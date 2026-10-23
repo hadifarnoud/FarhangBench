@@ -41,7 +41,7 @@ def _semantic_errors(item):
     """Checks the JSON Schema cannot express."""
     errors = []
     fmt, answer = item.get("format"), item.get("answer", {})
-    if not item["id"].startswith(item["task"][:2]):
+    if not item["id"].startswith(("x-", item["task"][:2])):
         errors.append(f"id {item['id']} does not match task {item['task']}")
     if item["task"][0] != item["track"]:
         errors.append(f"task {item['task']} is not in track {item['track']}")

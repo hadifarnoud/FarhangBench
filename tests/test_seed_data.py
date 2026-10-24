@@ -1,4 +1,4 @@
-"""Consistency checks over the shipped items (data/seed and data/derived)."""
+"""Consistency checks over the shipped items (data/seed, data/derived and data/external)."""
 
 import unittest
 from pathlib import Path
@@ -46,6 +46,13 @@ class SeedDataTest(unittest.TestCase):
             if item["format"] != "generation":
                 with self.subTest(item=item["id"]):
                     self.assertEqual(run_item(oracle, item, circular=True)["score"], 1.0)
+
+    def test_external_items_carry_provenance(self):
+        for item in self.items:
+            if item["metadata"]["status"] == "imported":
+                with self.subTest(item=item["id"]):
+                    for key in ("source", "source_id", "license"):
+                        self.assertIn(key, item["metadata"])
 
     def test_paired_groups_have_both_sides(self):
         groups = {}

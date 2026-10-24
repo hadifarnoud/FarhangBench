@@ -13,7 +13,7 @@ dependencies = []
 
 [project.optional-dependencies]
 anthropic = ["anthropic"]
-external = ["pyarrow"]
+import = ["pyarrow"]  # only for tools/import_external.py
 validate = ["jsonschema>=4"]
 
 [project.scripts]

@@ -3,7 +3,8 @@
 import json
 from pathlib import Path
 
-SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schema" / "item.schema.json"
+ROOT = Path(__file__).resolve().parent.parent
+SCHEMA_PATH = ROOT / "schema" / "item.schema.json"
 CANARY_KEY = "_canary"
 
 
@@ -60,6 +61,9 @@ def _semantic_errors(item):
             errors.append(f"answer.label {answer.get('label')!r} not in labels")
         if "abstain_label" in answer and answer["abstain_label"] not in labels:
             errors.append("abstain_label not in labels")
+    for img in item.get("images", []):
+        if not (ROOT / img["path"]).is_file():
+            errors.append(f"image not found: {img['path']}")
     if fmt == "generation":
         if not any(c.get("weight", 1) > 0 for c in item.get("rubric", [])):
             errors.append("rubric has no positive weight")

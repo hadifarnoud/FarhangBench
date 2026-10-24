@@ -7,6 +7,8 @@ adapters ignore it.
 import json
 import os
 import random
+import time
+import urllib.error
 import urllib.request
 
 DEFAULT_MAX_TOKENS = 16000
@@ -61,7 +63,7 @@ class AnthropicModel:
 
     def __init__(self, model, effort=None, max_tokens=DEFAULT_MAX_TOKENS):
         import anthropic
-        self.client = anthropic.Anthropic()
+        self.client = anthropic.Anthropic(max_retries=8)  # long runs hit rate limits; the SDK backs off
         self.model = model
         self.name = f"anthropic/{model}"
         self.effort = effort
@@ -87,7 +89,7 @@ class OpenAICompatibleModel:
     """Any server implementing the OpenAI ``/chat/completions`` API (vLLM, Ollama, OpenRouter, ...)."""
 
     def __init__(self, model, base_url, api_key_env="OPENAI_API_KEY",
-                 max_tokens=DEFAULT_MAX_TOKENS, temperature=0.0, timeout=600):
+                 max_tokens=DEFAULT_MAX_TOKENS, temperature=0.0, timeout=600, retries=6):
         self.model = model
         self.name = f"openai-compatible/{model}"
         self.url = base_url.rstrip("/") + "/chat/completions"
@@ -95,6 +97,7 @@ class OpenAICompatibleModel:
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.timeout = timeout
+        self.retries = retries
 
     def complete(self, prompt, item=None):
         body = json.dumps({
@@ -107,9 +110,18 @@ class OpenAICompatibleModel:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         req = urllib.request.Request(self.url, data=body, headers=headers)
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        return data["choices"][0]["message"].get("content") or ""
+        for attempt in range(self.retries + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                return data["choices"][0]["message"].get("content") or ""
+            except urllib.error.HTTPError as exc:
+                if exc.code not in (408, 409, 429) and exc.code < 500 or attempt == self.retries:
+                    raise
+            except (urllib.error.URLError, TimeoutError):
+                if attempt == self.retries:
+                    raise
+            time.sleep(min(60, 2 ** attempt))
 
 
 def make_model(spec, effort=None, base_url=None, api_key_env="OPENAI_API_KEY"):

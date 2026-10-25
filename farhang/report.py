@@ -113,6 +113,9 @@ def diagnostics(records):
     out["parse_failure_rate"] = (mean(r["parse_failure"] for r in records), len(records)) if records else (None, 0)
     out["error_rate"] = (mean(r["error"] for r in records), len(records)) if records else (None, 0)
     out["refusal_rate"] = (mean(r["refused"] for r in records), len(records)) if records else (None, 0)
+    tracked = [r for r in records if "truncated" in r]  # absent in runs recorded before it was tracked
+    if tracked:
+        out["truncation_rate"] = (mean(r["truncated"] for r in tracked), len(tracked))
     out["unjudged_generation_items"] = (sum(r["score"] is None for r in records), len(records))
     return out
 

@@ -5,6 +5,7 @@ adapters ignore it.
 """
 
 import base64
+import http.client
 import json
 import os
 import random
@@ -137,7 +138,7 @@ class OpenAICompatibleModel:
             except urllib.error.HTTPError as exc:
                 if exc.code not in (408, 409, 429) and exc.code < 500 or attempt == self.retries:
                     raise
-            except (urllib.error.URLError, TimeoutError):
+            except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException):
                 if attempt == self.retries:
                     raise
             time.sleep(min(60, 2 ** attempt))

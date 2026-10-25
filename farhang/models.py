@@ -106,7 +106,7 @@ class OpenAICompatibleModel:
     """Any server implementing the OpenAI ``/chat/completions`` API (vLLM, Ollama, OpenRouter, ...)."""
 
     def __init__(self, model, base_url, api_key_env="OPENAI_API_KEY",
-                 max_tokens=DEFAULT_MAX_TOKENS, temperature=0.0, timeout=600, retries=6):
+                 max_tokens=DEFAULT_MAX_TOKENS, temperature=0.0, timeout=600, retries=6, stream=False):
         self.model = model
         self.name = f"openai-compatible/{model}"
         self.url = base_url.rstrip("/") + "/chat/completions"
@@ -115,6 +115,10 @@ class OpenAICompatibleModel:
         self.temperature = temperature
         self.timeout = timeout
         self.retries = retries
+        # Streaming keeps long reasoning calls alive behind gateways that cut idle requests
+        # (DigitalOcean closes non-streaming requests after ~300 s); ``timeout`` then bounds
+        # the gap between chunks rather than the whole call.
+        self.stream = stream
 
     def complete(self, prompt, item=None):
         images = item_images(item)
@@ -125,6 +129,7 @@ class OpenAICompatibleModel:
             "messages": [{"role": "user", "content": content}],
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
+            **({"stream": True} if self.stream else {}),
         }).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -133,6 +138,8 @@ class OpenAICompatibleModel:
         for attempt in range(self.retries + 1):
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    if self.stream:
+                        return _read_stream(resp)
                     data = json.loads(resp.read().decode("utf-8"))
                 return data["choices"][0]["message"].get("content") or ""
             except urllib.error.HTTPError as exc:
@@ -142,6 +149,24 @@ class OpenAICompatibleModel:
                 if attempt == self.retries:
                     raise
             time.sleep(min(60, 2 ** attempt))
+
+
+def _read_stream(resp):
+    """Join the content deltas of an OpenAI-style server-sent event stream."""
+    parts = []
+    for raw in resp:
+        line = raw.decode("utf-8").strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if payload == "[DONE]":
+            break
+        chunk = json.loads(payload)
+        if chunk.get("error"):
+            raise RuntimeError(f"stream error: {chunk['error']}")
+        for choice in chunk.get("choices") or []:
+            parts.append((choice.get("delta") or {}).get("content") or "")
+    return "".join(parts)
 
 
 DO_BASE_URL = "https://inference.do-ai.run/v1"
@@ -166,7 +191,7 @@ def make_model(spec, effort=None, base_url=None, api_key_env="OPENAI_API_KEY"):
         key_env = DO_KEY_ENV if api_key_env == "OPENAI_API_KEY" else api_key_env
         if not os.environ.get(key_env):
             raise ValueError(f"do: models need a DigitalOcean model access key in ${key_env}")
-        m = OpenAICompatibleModel(model, base_url or DO_BASE_URL, api_key_env=key_env)
+        m = OpenAICompatibleModel(model, base_url or DO_BASE_URL, api_key_env=key_env, stream=True)
         m.name = f"digitalocean/{model}"
         return m
     raise ValueError(f"unknown model spec {spec!r}")

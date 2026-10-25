@@ -47,3 +47,19 @@ class ImageAdapterTest(unittest.TestCase):
             self.assertTrue(content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,"))
             model.complete("text only", {"prompt": "x"})
             self.assertEqual(captured["body"]["messages"][0]["content"], "text only")
+
+    def test_openai_stream_joins_deltas(self):
+        captured = {}
+        events = [{"choices": [{"delta": {"reasoning_content": "thinking"}}]},
+                  {"choices": [{"delta": {"content": "**"}}]},
+                  {"choices": [{"delta": {"content": "C**"}, "finish_reason": "stop"}]}]
+        stream = "".join(f"data: {json.dumps(e)}\n\n" for e in events) + "data: [DONE]\n\n"
+
+        def urlopen(req, timeout):
+            captured["body"] = json.loads(req.data)
+            return io.BytesIO(stream.encode())
+
+        model = OpenAICompatibleModel("m", "http://localhost:1/v1", stream=True)
+        with mock.patch("urllib.request.urlopen", urlopen):
+            self.assertEqual(model.complete("prompt"), "**C**")
+        self.assertTrue(captured["body"]["stream"])

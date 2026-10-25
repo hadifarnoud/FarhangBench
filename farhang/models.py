@@ -143,9 +143,13 @@ class OpenAICompatibleModel:
             time.sleep(min(60, 2 ** attempt))
 
 
+DO_BASE_URL = "https://inference.do-ai.run/v1"
+DO_KEY_ENV = "DO_MODEL_ACCESS_KEY"
+
+
 def make_model(spec, effort=None, base_url=None, api_key_env="OPENAI_API_KEY"):
-    """Build a model from a spec such as ``oracle``, ``random``, ``anthropic:claude-opus-5-5``
-    or ``openai:my-model`` (the latter needs ``base_url``)."""
+    """Build a model from a spec such as ``oracle``, ``random``, ``anthropic:claude-opus-5-5``,
+    ``openai:my-model`` (needs ``base_url``) or ``do:<model>`` (DigitalOcean serverless inference)."""
     if spec == "oracle":
         return OracleModel()
     if spec == "random":
@@ -157,4 +161,11 @@ def make_model(spec, effort=None, base_url=None, api_key_env="OPENAI_API_KEY"):
         if not base_url:
             raise ValueError("openai-compatible models need --base-url")
         return OpenAICompatibleModel(model, base_url, api_key_env=api_key_env)
+    if provider == "do" and model:
+        key_env = DO_KEY_ENV if api_key_env == "OPENAI_API_KEY" else api_key_env
+        if not os.environ.get(key_env):
+            raise ValueError(f"do: models need a DigitalOcean model access key in ${key_env}")
+        m = OpenAICompatibleModel(model, base_url or DO_BASE_URL, api_key_env=key_env)
+        m.name = f"digitalocean/{model}"
+        return m
     raise ValueError(f"unknown model spec {spec!r}")

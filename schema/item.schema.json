@@ -266,7 +266,12 @@
             "imported",
             "derived",
             "retired"
-          ]
+          ],
+          "description": "draft or validated for native items; validation is derived from human reviews (validation/), so only 'retired' set here has an effect on scoring."
+        },
+        "author": {
+          "type": "string",
+          "description": "Who wrote the item. Their own reviews of it do not count towards validation."
         },
         "source": {
           "type": "string",

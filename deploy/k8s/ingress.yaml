@@ -1,0 +1,27 @@
+# Serve over HTTPS only: reviewers sign in with HTTP Basic auth, which is plain text without TLS.
+# The annotations assume ingress-nginx and cert-manager; adjust them for your cluster.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: farhangbench-review
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: 64k
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - review.example.com
+      secretName: farhangbench-review-tls
+  rules:
+    - host: review.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: farhangbench-review
+                port:
+                  name: http

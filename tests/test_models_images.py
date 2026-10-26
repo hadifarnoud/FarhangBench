@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from farhang.data import ROOT, load_items
-from farhang.models import AnthropicModel, OpenAICompatibleModel, item_images
+from farhang.models import AnthropicModel, OpenAICompatibleModel, item_images, make_model
 
 IMAGE_ITEM = load_items(ROOT / "data" / "derived" / "met_carpets.jsonl")[0]
 
@@ -47,3 +47,45 @@ class ImageAdapterTest(unittest.TestCase):
             self.assertTrue(content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,"))
             model.complete("text only", {"prompt": "x"})
             self.assertEqual(captured["body"]["messages"][0]["content"], "text only")
+
+    def test_openai_stream_joins_deltas(self):
+        captured = {}
+        events = [{"choices": [{"delta": {"reasoning_content": "thinking"}}]},
+                  {"choices": [{"delta": {"content": "**"}}]},
+                  {"choices": [{"delta": {"content": "C**"}, "finish_reason": "stop"}]}]
+        stream = "".join(f"data: {json.dumps(e)}\n\n" for e in events) + "data: [DONE]\n\n"
+
+        def urlopen(req, timeout):
+            captured["body"] = json.loads(req.data)
+            return io.BytesIO(stream.encode())
+
+        model = OpenAICompatibleModel("m", "http://localhost:1/v1", stream=True)
+        with mock.patch("urllib.request.urlopen", urlopen):
+            response = model.complete("prompt")
+        self.assertEqual(response, "**C**")
+        self.assertFalse(getattr(response, "truncated", False))
+        self.assertTrue(captured["body"]["stream"])
+
+    def test_openai_marks_length_cutoff_as_truncated(self):
+        stream = ('data: {"choices": [{"delta": {"reasoning_content": "..."}, "finish_reason": "length"}]}\n\n'
+                  "data: [DONE]\n\n")
+        model = OpenAICompatibleModel("m", "http://localhost:1/v1", stream=True)
+        with mock.patch("urllib.request.urlopen", lambda req, timeout: io.BytesIO(stream.encode())):
+            response = model.complete("prompt")
+        self.assertEqual(response, "")
+        self.assertTrue(response.truncated)
+
+    def test_openai_retries_mid_stream_error(self):
+        streams = iter(['data: {"error": {"message": "stream failed"}}\n\n',
+                        'data: {"choices": [{"delta": {"content": "B"}}]}\n\ndata: [DONE]\n\n'])
+        model = OpenAICompatibleModel("m", "http://localhost:1/v1", stream=True)
+        with mock.patch("urllib.request.urlopen", lambda req, timeout: io.BytesIO(next(streams).encode())), \
+                mock.patch("time.sleep"):
+            self.assertEqual(model.complete("prompt"), "B")
+
+    def test_do_key_fallback(self):
+        env = {"FARHANGBENCH_DIGITALOCEAN_KEY": "k"}
+        with mock.patch.dict("os.environ", env, clear=True):
+            self.assertEqual(make_model("do:m").api_key, "k")
+        with mock.patch.dict("os.environ", {}, clear=True), self.assertRaises(ValueError):
+            make_model("do:m")

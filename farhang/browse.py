@@ -16,7 +16,8 @@ from pathlib import Path
 
 from .data import CANARY_KEY, ROOT, iter_files, validate_items
 from .runner import gold_summary
-from .taxonomy import TASKS, TRACKS
+from .taxonomy import NATIVE_SOURCE, TASKS, TRACKS
+from .validation import REVIEWS_DIR, statuses
 
 _lock = threading.Lock()
 
@@ -25,8 +26,11 @@ def _editable(data_dir, file):
     return (Path(data_dir) / "seed") in Path(file).parents
 
 
-def read_items(data_dir):
-    """All items, each with ``_file`` (path relative to the data dir), ``_line`` and ``_editable``."""
+def read_items(data_dir, reviews_dir=REVIEWS_DIR):
+    """All items, each with ``_file`` (path relative to the data dir), ``_line``, ``_editable`` and ``_status``.
+
+    ``_status`` is the validation status from human reviews for native items, and ``metadata.status`` otherwise.
+    """
     data_dir = Path(data_dir)
     items = []
     for file in iter_files(data_dir):
@@ -40,6 +44,10 @@ def read_items(data_dir):
                     continue
                 obj.update(_file=rel, _line=lineno, _editable=_editable(data_dir, file), _gold=gold_summary(obj))
                 items.append(obj)
+    native = [i for i in items if i["metadata"].get("source", NATIVE_SOURCE) == NATIVE_SOURCE]
+    review = statuses(native, reviews_dir)
+    for it in items:
+        it["_status"] = review[it["id"]]["status"] if it["id"] in review else it["metadata"].get("status")
     return items
 
 
@@ -280,7 +288,7 @@ function initFilters() {
   fillSelect("f-task", Object.keys(META.tasks).filter(t => !$("f-track").value || t[0] === $("f-track").value)
     .map(t => [t, `${t} (${kc[t] || 0})`]), "All tasks");
   for (const [id, key, label] of [["f-source", src, "All sources"], ["f-format", it => it.format, "All formats"],
-      ["f-status", it => it.metadata?.status, "All statuses"], ["f-lang", it => it.lang, "All languages"]]) {
+      ["f-status", it => it._status, "All statuses"], ["f-lang", it => it.lang, "All languages"]]) {
     const c = counts(key);
     fillSelect(id, Object.keys(c).sort().map(k => [k, `${k} (${c[k]})`]), label);
   }
@@ -294,7 +302,7 @@ function filtered() {
   const q = $("q").value.trim().toLowerCase(), f = id => $(id).value;
   return ITEMS.filter(it => (!f("f-track") || it.track === f("f-track")) && (!f("f-task") || it.task === f("f-task"))
     && (!f("f-source") || src(it) === f("f-source")) && (!f("f-format") || it.format === f("f-format"))
-    && (!f("f-status") || it.metadata?.status === f("f-status")) && (!f("f-lang") || it.lang === f("f-lang"))
+    && (!f("f-status") || it._status === f("f-status")) && (!f("f-lang") || it.lang === f("f-lang"))
     && (!$("f-img").checked || (it.images || []).length) && (!q || haystack(it).includes(q)));
 }
 function renderList() {
@@ -333,6 +341,7 @@ function renderDetail(it, msg) {
   if (it.reference) h += `<h3>Reference answer</h3><div class="block" dir="auto">${esc(it.reference)}</div>`;
   h += `<h3>Metadata</h3><table class="kv"><tr><td>language</td><td>${esc(it.lang)}</td></tr>` + Object.entries(md).map(([k, v]) =>
     `<tr><td>${esc(k)}</td><td dir="auto">${esc(Array.isArray(v) ? v.join(", ") : v)}</td></tr>`).join("")
+    + `<tr><td>review status</td><td>${esc(it._status)}${it._editable ? ' <span class="muted">(from human reviews; see <code>farhang review</code>)</span>' : ""}</td></tr>`
     + `<tr><td>file</td><td><code>data/${esc(it._file)}:${it._line}</code>${it._editable ? "" : " (generated, read-only)"}</td></tr></table>`;
   if (META.editable) {
     h += `<h3>Edit</h3>` + (it._editable

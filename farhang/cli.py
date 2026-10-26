@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import random
 import re
 import sys
@@ -176,7 +177,25 @@ def cmd_review(args):
     if args.summary:
         print("\n".join(summary_lines(ReviewStore(Path(args.data), Path(args.reviews)))))
         return 0
-    serve(Path(args.data), Path(args.reviews), host=args.host, port=args.port, open_browser=not args.no_open)
+    serve(Path(args.data), Path(args.reviews), host=args.host, port=args.port, open_browser=not args.no_open,
+          users_file=args.users)
+    return 0
+
+
+def cmd_review_user(args):
+    import getpass
+    from .auth import user_line
+    if args.password_stdin:
+        password = sys.stdin.readline().rstrip("\n")
+    else:
+        password = getpass.getpass(f"Password for {args.name}: ")
+        if password != getpass.getpass("Again: "):
+            print("passwords differ", file=sys.stderr)
+            return 1
+    if len(password) < 10:
+        print("use at least 10 characters", file=sys.stderr)
+        return 1
+    print(user_line(args.name, password))
     return 0
 
 
@@ -270,7 +289,14 @@ def main(argv=None):
     p.add_argument("--port", type=int, default=8766)
     p.add_argument("--no-open", action="store_true", help="don't open a browser window")
     p.add_argument("--summary", action="store_true", help="print validation progress and exit")
+    p.add_argument("--users", default=os.environ.get("FARHANG_USERS_FILE"),
+                   help="reviewer accounts file (from review-user); requires sign-in. Default: $FARHANG_USERS_FILE")
     p.set_defaults(func=cmd_review)
+
+    p = sub.add_parser("review-user", help="print a users-file line (name:password hash) for a reviewer account")
+    p.add_argument("name")
+    p.add_argument("--password-stdin", action="store_true", help="read the password from stdin instead of prompting")
+    p.set_defaults(func=cmd_review_user)
 
     args = parser.parse_args(argv)
     return args.func(args)

@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: farhangbench-review
+spec:
+  # One writer: reviews are appended to files on a ReadWriteOnce volume, so never run two pods at once.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: farhangbench-review
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: farhangbench-review
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: review
+          image: farhangbench-review
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8766
+          env:
+            - name: FARHANG_USERS_FILE
+              value: /etc/farhang/users
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: reviews
+              mountPath: /app/validation
+            - name: users
+              mountPath: /etc/farhang
+              readOnly: true
+      volumes:
+        - name: reviews
+          persistentVolumeClaim:
+            claimName: farhangbench-reviews
+        - name: users
+          secret:
+            secretName: farhangbench-review-users
+            items:
+              - key: users
+                path: users

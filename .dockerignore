@@ -1,0 +1,15 @@
+.git
+.github
+**/__pycache__
+*.pyc
+*.egg-info
+build
+dist
+results
+validation
+deploy
+docs
+tests
+tools
+*.md
+!data/**/*.md

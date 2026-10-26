@@ -1,0 +1,10 @@
+# Reviews (validation/*.jsonl). Small, but they are the only state: back them up (deploy/README.md).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: farhangbench-reviews
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi

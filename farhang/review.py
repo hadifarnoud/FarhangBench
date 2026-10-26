@@ -4,14 +4,20 @@ Each reviewer answers an item blind, then sees the answer key and judges it. The
 key before that reviewer's blind answer is recorded, and the first blind answer cannot be changed. Reviews are
 appended to ``validation/<reviewer>.jsonl`` (see ``farhang.validation``), which are plain files to commit.
 
+Locally, reviewers type their name. For a shared deployment (``deploy/``), pass ``--users`` (a file written with
+``python -m farhang review-user``): every request then needs HTTP Basic auth, and the signed-in account is the
+reviewer, so nobody can answer or peek at keys under someone else's name.
+
 The default queue is native items (the ones the FarhangScore is built from); any imported or derived source can be
 reviewed too, as an audit.
 """
 
+import io
 import json
 import mimetypes
 import threading
 import webbrowser
+import zipfile
 from collections import Counter, defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -161,10 +167,36 @@ def summary_lines(store):
     return lines
 
 
-def make_handler(store):
+def export_zip(reviews_dir):
+    """All review files as a zip, to download from a deployment and commit to git."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for file in sorted(Path(reviews_dir).glob("*.jsonl")) if Path(reviews_dir).is_dir() else []:
+            zf.write(file, f"validation/{file.name}")
+    return buf.getvalue()
+
+
+def make_handler(store, users=None):
+    """Request handler; with ``users`` (a ``farhang.auth.Users``) every route but /healthz needs a login."""
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
+
+        def _user(self):
+            """The signed-in reviewer, or None after sending a 401. Without accounts, returns ''."""
+            if users is None:
+                return ""
+            name = users.check(self.headers.get("Authorization"))
+            if name is None:
+                body = b'{"error": "sign in required"}'
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Basic realm="FarhangBench review", charset="UTF-8"')
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            return name
 
         def _send(self, code, body, ctype="application/json; charset=utf-8"):
             data = body if isinstance(body, bytes) else body.encode("utf-8")
@@ -180,8 +212,23 @@ def make_handler(store):
 
         def do_GET(self):
             url = urlparse(self.path)
+            if url.path == "/healthz":
+                return self._send(200, "ok", "text/plain; charset=utf-8")
+            user = self._user()
+            if user is None:
+                return
             qs = {k: v[0] for k, v in parse_qs(url.query).items()}
-            reviewer = reviewer_slug(qs.get("reviewer", ""))
+            reviewer = user or reviewer_slug(qs.get("reviewer", ""))
+            if url.path == "/api/whoami":
+                return self._json(200, {"reviewer": user or None, "signed_in": users is not None})
+            if url.path == "/api/export":
+                self.send_response(200)
+                data = export_zip(store.reviews_dir)
+                self.send_header("Content-Type", "application/zip")
+                self.send_header("Content-Disposition", 'attachment; filename="farhangbench-reviews.zip"')
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                return self.wfile.write(data)
             if url.path == "/":
                 return self._send(200, PAGE.replace("__META__", json.dumps(
                     {"tracks": {k: v[2] for k, v in TRACKS.items()}, "tasks": TASKS, "flags": FLAGS},
@@ -203,11 +250,15 @@ def make_handler(store):
             self._json(404, {"error": "not found"})
 
         def do_POST(self):
-            if self.headers.get("Origin") not in (None, f"http://{self.headers.get('Host')}"):
+            origin = self.headers.get("Origin")
+            if origin is not None and urlparse(origin).netloc != self.headers.get("Host"):
                 return self._json(403, {"error": "cross-origin request refused"})
+            user = self._user()
+            if user is None:
+                return
             try:
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode("utf-8"))
-                reviewer = reviewer_slug(body.get("reviewer", ""))
+                reviewer = user or reviewer_slug(body.get("reviewer", ""))
                 if not reviewer:
                     raise ValueError("reviewer name required")
                 if self.path == "/api/blind":
@@ -225,11 +276,23 @@ def make_handler(store):
     return Handler
 
 
-def serve(data_dir, reviews_dir=REVIEWS_DIR, host="127.0.0.1", port=8766, open_browser=True):
+def serve(data_dir, reviews_dir=REVIEWS_DIR, host="127.0.0.1", port=8766, open_browser=True, users_file=None):
+    from .auth import Users
     store = ReviewStore(data_dir, reviews_dir)
-    server = ThreadingHTTPServer((host, port), make_handler(store))
+    users = Users(users_file) if users_file else None
+    if users is not None:
+        try:
+            count = len(users._load())
+        except OSError as exc:
+            raise SystemExit(f"cannot read the users file {users_file}: {exc}")
+        if not count:
+            raise SystemExit(f"the users file {users_file} has no accounts; add some with `farhang review-user`")
+    if users is None and host not in ("127.0.0.1", "localhost", "::1"):
+        print("warning: serving beyond localhost without --users; anyone who can reach it can review as anyone")
+    server = ThreadingHTTPServer((host, port), make_handler(store, users))
     url = f"http://{host}:{server.server_address[1]}/"
-    print(f"FarhangBench review at {url} — reviews are saved to {reviews_dir} (Ctrl+C to stop)")
+    print(f"FarhangBench review at {url} — reviews are saved to {reviews_dir}"
+          f"{' — sign-in required' if users else ''} (Ctrl+C to stop)", flush=True)
     if open_browser:
         threading.Timer(0.5, webbrowser.open, [url]).start()
     try:
@@ -371,6 +434,7 @@ const STATUS = { unreviewed: "Unreviewed", in_review: "In review", validated: "V
 let ITEMS = [], current = null, choice = null, verdict = null;
 const store = (k, v) => { try { v === undefined ? null : localStorage.setItem(k, v); return localStorage.getItem(k); } catch (e) { return null; } };
 $("who").value = store("farhang-reviewer") || "";
+let SIGNED_IN = false;
 
 async function api(path, body) {
   const res = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {});
@@ -545,7 +609,8 @@ async function renderProgress() {
   $("progress-view").innerHTML = `<div style="max-width:1000px"><h2 style="font-size:17px">Progress</h2>
     <p>${tot.validated} of ${tot.items} native items validated${tot.disputed ? `, ${tot.disputed} disputed` : ""}. Human accuracy is the share of blind answers that matched the key: a human baseline, and a warning sign when it is low.</p>
     ${table("Native items by task", native)}${ref.some(r => r.blind_answers) ? table("Imported and derived sources (audit)", ref.filter(r => r.blind_answers)) : ""}
-    <h3>Reviewers</h3><p>${Object.entries(p.reviewers).map(([k, v]) => `${esc(k)} (${v})`).join(", ") || "No reviews yet."}</p>
+    <h3>Reviewers</h3><p>${Object.entries(p.reviewers).map(([k, v]) => `${esc(k)} (${v})`).join(", ") || "No reviews yet."}
+    · <a href="/api/export">Download all reviews (zip)</a> to commit them to <code>validation/</code></p>
     <h3>Disputed or flagged items, for authors to fix</h3>` + (p.problems.length ? `<table><thead><tr><th>Item</th><th>Status and flags</th><th>Reviewer notes</th></tr></thead><tbody>`
       + p.problems.map(x => `<tr><td><code>${esc(x.id)}</code><div class="muted">${esc(x.task)}</div><div class="fa" dir="auto">${esc(x.prompt)}</div></td>
         <td><span class="chip ${x.status}">${STATUS[x.status]}</span><div class="muted">${x.flags.map(f => esc(META.flags[f] || f)).join(", ")}</div></td>
@@ -562,7 +627,13 @@ $("t-review").onclick = () => tab("review"); $("t-progress").onclick = () => tab
 $("who").addEventListener("change", async () => { store("farhang-reviewer", who()); current = null; await reload(); welcome(); });
 ["f-scope", "f-task", "f-show"].forEach(id => $(id).addEventListener("input", renderList));
 $("f-track").addEventListener("input", () => { $("f-task").value = ""; initFilters(); renderList(); });
-initFilters(); welcome(); reload();
+(async () => {
+  try {
+    const me = await api("/api/whoami");
+    if (me.signed_in) { SIGNED_IN = true; $("who").value = me.reviewer; $("who").readOnly = true; $("who").title = "Signed in"; }
+  } catch (e) { /* older server */ }
+  initFilters(); welcome(); reload();
+})();
 </script>
 </body>
 </html>

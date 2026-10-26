@@ -9,6 +9,7 @@ from farhang.browse import export_static, read_items, save_item
 from farhang.data import ROOT, load_items
 from farhang.export import html_report, item_rows, score_rows, write_all
 from farhang.models import OracleModel
+from farhang.report import summarize
 from farhang.runner import gold_summary, run
 from farhang.weights import Weights
 
@@ -73,12 +74,11 @@ class ExportTest(unittest.TestCase):
         self.assertEqual(gold_summary({"format": "exact", "answer": {"accept": ["a", "b"]}}), "a | b")
 
     def test_score_rows(self):
-        rows = score_rows(self.records, Weights.load())
-        self.assertEqual(rows[0]["level"], "overall")
-        self.assertEqual(rows[0]["score"], 100.0)
-        for task in {r["task"] for r in rows if r["level"] == "task"}:
-            shares = [r["share"] for r in rows if r["level"] == "source" and r["task"] == task]
-            self.assertAlmostEqual(sum(shares), 1.0, places=3)
+        rows = score_rows(summarize(self.records, Weights.load(), status_map={}, n_boot=50))
+        self.assertEqual((rows[0]["scope"], rows[0]["level"], rows[0]["score"]), ("provisional", "overall", 100.0))
+        self.assertFalse([r for r in rows if r["scope"] == "core"])
+        ref = [r for r in rows if r["scope"] == "reference"]
+        self.assertEqual([(r["source"], r["score"]) for r in ref], [("met_carpets", 100.0)])
 
     def test_write_all(self):
         with tempfile.TemporaryDirectory() as d:

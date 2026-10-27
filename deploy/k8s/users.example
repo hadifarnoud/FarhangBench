@@ -1,4 +1,5 @@
-# Copy to deploy/k8s/users and replace with real accounts, one per reviewer:
-#   python -m farhang review-user "Maryam"   >> deploy/k8s/users
-# The name before ":" is the reviewer's id in validation/<name>.jsonl. Never commit the real file.
+# Copy to deploy/k8s/users with one line per ADMIN (usually just you):
+#   python -m farhang review-user "hadi" >> deploy/k8s/users
+# Admins add and manage reviewers in the review page's People tab; those accounts live on the volume.
+# The name before ":" is the admin's reviewer id in validation/<name>.jsonl. Never commit the real file.
 example:pbkdf2_sha256$600000$00000000000000000000000000000000$REPLACE_ME

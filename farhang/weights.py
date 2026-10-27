@@ -45,6 +45,12 @@ def source_notes(path=SOURCES_PATH):
     return json.loads(path.read_text(encoding="utf-8")).get("sources", {}) if path.is_file() else {}
 
 
+def review_required_sources(path=SOURCES_PATH):
+    """Reference sources whose items count only once human reviewers have validated them."""
+    path = Path(path)
+    return set(json.loads(path.read_text(encoding="utf-8")).get("review_required", {})) if path.is_file() else set()
+
+
 def weighted_mean(pairs):
     """Mean of (value, weight) pairs; ignores zero-weight entries."""
     total = sum(w for _, w in pairs)

@@ -39,6 +39,15 @@ class StatusRulesTest(unittest.TestCase):
         self.assertEqual(self.status("correct", "correct", "wrong"), "validated")  # 2 of 3
         self.assertEqual(self.status("correct", "wrong", "unsure"), "disputed")
 
+    def test_outdated(self):
+        def rv(verdict, outdated):
+            return dict(review(verdict), flags=["outdated"] if outdated else [])
+        status = lambda *rs: item_status(self.item, {f"r{i}": r for i, r in enumerate(rs)})["status"]
+        self.assertEqual(status(rv("wrong", True), rv("wrong", True)), "outdated")
+        self.assertEqual(status(rv("wrong", True), rv("correct", False)), "outdated")  # half is enough
+        self.assertEqual(status(rv("correct", False), rv("correct", False), rv("wrong", True)), "validated")
+        self.assertEqual(status(rv("wrong", True)), "disputed")  # one review isn't enough to drop it
+
     def test_author_reviews_do_not_count(self):
         item = {"id": "L1-0001", "metadata": {"status": "draft", "author": "Maryam"}}
         st = item_status(item, {"maryam": review("correct"), "ali": review("correct")})

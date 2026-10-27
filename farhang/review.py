@@ -4,9 +4,10 @@ Each reviewer answers an item blind, then sees the answer key and judges it. The
 key before that reviewer's blind answer is recorded, and the first blind answer cannot be changed. Reviews are
 appended to ``validation/<reviewer>.jsonl`` (see ``farhang.validation``), which are plain files to commit.
 
-Locally, reviewers type their name. For a shared deployment (``deploy/``), pass ``--users`` (a file written with
-``python -m farhang review-user``): every request then needs HTTP Basic auth, and the signed-in account is the
-reviewer, so nobody can answer or peek at keys under someone else's name.
+Locally, reviewers type their name. For a shared deployment (``deploy/``), pass ``--users`` (admin accounts, one
+line each from ``python -m farhang review-user``) and ``--accounts`` (a writable file for the reviewer accounts that
+admins manage in the People tab; see ``farhang.accounts``). Every request then needs HTTP Basic auth, and the
+signed-in account is the reviewer, so nobody can answer or peek at keys under someone else's name.
 
 The default queue is native items (the ones the FarhangScore is built from); any imported or derived source can be
 reviewed too, as an audit.
@@ -26,6 +27,7 @@ from urllib.parse import parse_qs, urlparse
 from .data import ROOT, load_items
 from .runner import gold_summary
 from .taxonomy import NATIVE_SOURCE, TASKS, TRACKS
+from .weights import review_required_sources
 from .validation import (FLAGS, REVIEWS_DIR, VERDICTS, append_record, blind_correct, content_hash, item_status,
                          load_records, merge_reviews, reviewer_slug)
 
@@ -64,7 +66,7 @@ class ReviewStore:
         return merge_reviews(load_records(self.reviews_dir))
 
     def listing(self, reviewer):
-        items, merged = self.items(), self.merged()
+        items, merged, gated = self.items(), self.merged(), review_required_sources()
         out = []
         for it in items.values():
             reviews = merged.get((it["id"], content_hash(it)), {})
@@ -72,7 +74,7 @@ class ReviewStore:
             if it["metadata"].get("author") and reviewer_slug(it["metadata"]["author"]) == reviewer:
                 continue  # authors don't validate their own items
             st = item_status(it, reviews)
-            out.append(dict(blind_view(it), status=st["status"], verdicts=st["verdicts"],
+            out.append(dict(blind_view(it), status=st["status"], verdicts=st["verdicts"], gated=source_of(it) in gated,
                             answered="blind_answer" in mine, my_verdict=mine.get("verdict")))
         order = {t: i for i, t in enumerate(TASKS)}
         out.sort(key=lambda it: (it["source"] != NATIVE_SOURCE, order.get(it["task"], len(order)), it["id"]))
@@ -130,7 +132,7 @@ class ReviewStore:
             reviews = merged.get((it["id"], content_hash(it)), {})
             st = item_status(it, reviews)
             group = it["task"] if source_of(it) == NATIVE_SOURCE else f"source:{source_of(it)}"
-            if st["status"] != "retired":
+            if st["status"] not in ("retired", "outdated"):
                 rows[group]["items"] += 1
             rows[group][st["status"]] += 1
             for r in reviews.values():
@@ -138,14 +140,15 @@ class ReviewStore:
                     reviewers[r["reviewer"]] += 1
                 if r.get("blind_correct") is not None:
                     accuracy[group].append(r["blind_correct"])
-            if st["status"] == "disputed" or (st["flags"] and st["status"] != "retired"):
+            if st["status"] == "disputed" or (st["flags"] and st["status"] not in ("retired", "outdated")):
                 problems.append({"id": it["id"], "task": it["task"], "source": source_of(it), "status": st["status"],
                                  "flags": st["flags"], "prompt": it["prompt"][:160],
                                  "comments": [{"reviewer": r["reviewer"], "verdict": r.get("verdict"),
                                                "comment": r.get("comment", ""),
                                                "suggested_answer": r.get("suggested_answer", "")}
                                               for r in reviews.values() if r.get("verdict")]})
-        table = [{"group": g, **dict(c), "human_accuracy": (sum(accuracy[g]) / len(accuracy[g])) if accuracy[g] else None,
+        gated = review_required_sources()
+        table = [{"group": g, **dict(c), "review_required": g.removeprefix("source:") in gated, "human_accuracy": (sum(accuracy[g]) / len(accuracy[g])) if accuracy[g] else None,
                   "blind_answers": len(accuracy[g])} for g, c in rows.items()]
         order = list(TASKS)
         table.sort(key=lambda r: (r["group"].startswith("source:"), order.index(r["group"]) if r["group"] in order else 0,
@@ -156,7 +159,7 @@ class ReviewStore:
 def summary_lines(store):
     """Plain-text progress, for ``python -m farhang review --summary``."""
     p = store.progress()
-    cols = ("items", "unreviewed", "in_review", "validated", "disputed")
+    cols = ("items", "unreviewed", "in_review", "validated", "disputed", "outdated")
     lines = [f"{'group':40s}" + "".join(f"{c:>12s}" for c in cols) + f"{'human acc.':>12s}"]
     for r in p["rows"]:
         acc = "" if r["human_accuracy"] is None else f"{100 * r['human_accuracy']:.0f}%"
@@ -176,19 +179,20 @@ def export_zip(reviews_dir):
     return buf.getvalue()
 
 
-def make_handler(store, users=None):
-    """Request handler; with ``users`` (a ``farhang.auth.Users``) every route but /healthz needs a login."""
+def make_handler(store, accounts=None):
+    """Request handler; with ``accounts`` (a ``farhang.accounts.Accounts``) every route but /healthz needs a login."""
+    from .accounts import AccountError
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
 
         def _user(self):
-            """The signed-in reviewer, or None after sending a 401. Without accounts, returns ''."""
-            if users is None:
-                return ""
-            name = users.check(self.headers.get("Authorization"))
-            if name is None:
+            """The signed-in account (a dict), or None after sending a 401. Without accounts, an empty dict."""
+            if accounts is None:
+                return {}
+            user = accounts.authenticate(self.headers.get("Authorization"))
+            if user is None:
                 body = b'{"error": "sign in required"}'
                 self.send_response(401)
                 self.send_header("WWW-Authenticate", 'Basic realm="FarhangBench review", charset="UTF-8"')
@@ -196,7 +200,7 @@ def make_handler(store, users=None):
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
-            return name
+            return user
 
         def _send(self, code, body, ctype="application/json; charset=utf-8"):
             data = body if isinstance(body, bytes) else body.encode("utf-8")
@@ -218,9 +222,21 @@ def make_handler(store, users=None):
             if user is None:
                 return
             qs = {k: v[0] for k, v in parse_qs(url.query).items()}
-            reviewer = user or reviewer_slug(qs.get("reviewer", ""))
+            reviewer = user.get("name") or reviewer_slug(qs.get("reviewer", ""))
+            if url.path == "/":
+                return self._send(200, PAGE.replace("__META__", json.dumps(
+                    {"tracks": {k: v[2] for k, v in TRACKS.items()}, "tasks": TASKS, "flags": FLAGS},
+                    ensure_ascii=False)), "text/html; charset=utf-8")
             if url.path == "/api/whoami":
-                return self._json(200, {"reviewer": user or None, "signed_in": users is not None})
+                return self._json(200, {"reviewer": user.get("name"), "signed_in": accounts is not None,
+                                        "role": user.get("role"), "must_change": user.get("must_change", False),
+                                        "can_change_password": user.get("managed", False)})
+            if user.get("must_change"):
+                return self._json(403, {"error": "choose a new password first", "must_change": True})
+            if url.path == "/api/users":
+                if user.get("role") != "admin":
+                    return self._json(403, {"error": "admins only"})
+                return self._json(200, accounts.list())
             if url.path == "/api/export":
                 self.send_response(200)
                 data = export_zip(store.reviews_dir)
@@ -229,10 +245,6 @@ def make_handler(store, users=None):
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 return self.wfile.write(data)
-            if url.path == "/":
-                return self._send(200, PAGE.replace("__META__", json.dumps(
-                    {"tracks": {k: v[2] for k, v in TRACKS.items()}, "tasks": TASKS, "flags": FLAGS},
-                    ensure_ascii=False)), "text/html; charset=utf-8")
             if url.path == "/api/items":
                 if not reviewer:
                     return self._json(400, {"error": "reviewer name required"})
@@ -253,12 +265,38 @@ def make_handler(store, users=None):
             origin = self.headers.get("Origin")
             if origin is not None and urlparse(origin).netloc != self.headers.get("Host"):
                 return self._json(403, {"error": "cross-origin request refused"})
+            # A JSON content type can't be sent by a plain cross-site form, which backs up the origin check.
+            if not (self.headers.get("Content-Type") or "").startswith("application/json"):
+                return self._json(415, {"error": "send JSON"})
             user = self._user()
             if user is None:
                 return
             try:
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode("utf-8"))
-                reviewer = user or reviewer_slug(body.get("reviewer", ""))
+                if self.path == "/api/password":
+                    if not user.get("managed"):
+                        raise AccountError("this account comes from the users Secret; change it there")
+                    accounts.change_password(user["name"], body.get("new_password", ""))
+                    return self._json(200, {"ok": True})
+                if user.get("must_change"):
+                    return self._json(403, {"error": "choose a new password first", "must_change": True})
+                if self.path == "/api/users":
+                    if user.get("role") != "admin":
+                        return self._json(403, {"error": "admins only"})
+                    action, name = body.get("action"), reviewer_slug(body.get("name", ""))
+                    if action == "add":
+                        name, password = accounts.add(body.get("name", ""), body.get("role", "reviewer"), user["name"])
+                        return self._json(200, {"name": name, "password": password})
+                    if action == "reset":
+                        return self._json(200, {"name": name, "password": accounts.reset(name, user["name"])})
+                    if action == "role":
+                        accounts.set_role(name, body.get("role"), user["name"])
+                        return self._json(200, {"ok": True})
+                    if action == "remove":
+                        accounts.remove(name, user["name"])
+                        return self._json(200, {"ok": True})
+                    raise ValueError("action must be add, reset, role or remove")
+                reviewer = user.get("name") or reviewer_slug(body.get("reviewer", ""))
                 if not reviewer:
                     raise ValueError("reviewer name required")
                 if self.path == "/api/blind":
@@ -268,6 +306,8 @@ def make_handler(store, users=None):
                         reviewer, body["item_id"], body.get("verdict"), body.get("flags", []),
                         body.get("comment", ""), body.get("suggested_answer", "")))
                 return self._json(404, {"error": "not found"})
+            except AccountError as exc:
+                return self._json(400, {"error": str(exc)})
             except PermissionError as exc:
                 return self._json(403, {"error": str(exc)})
             except (ValueError, KeyError, TypeError) as exc:
@@ -276,23 +316,22 @@ def make_handler(store, users=None):
     return Handler
 
 
-def serve(data_dir, reviews_dir=REVIEWS_DIR, host="127.0.0.1", port=8766, open_browser=True, users_file=None):
-    from .auth import Users
+def serve(data_dir, reviews_dir=REVIEWS_DIR, host="127.0.0.1", port=8766, open_browser=True, users_file=None,
+          accounts_file=None):
+    from .accounts import AccountError, Accounts
     store = ReviewStore(data_dir, reviews_dir)
-    users = Users(users_file) if users_file else None
-    if users is not None:
+    accounts = Accounts(accounts_file, users_file) if (users_file or accounts_file) else None
+    if accounts is not None:
         try:
-            count = len(users._load())
-        except OSError as exc:
-            raise SystemExit(f"cannot read the users file {users_file}: {exc}")
-        if not count:
-            raise SystemExit(f"the users file {users_file} has no accounts; add some with `farhang review-user`")
-    if users is None and host not in ("127.0.0.1", "localhost", "::1"):
+            accounts.check_startup()
+        except AccountError as exc:
+            raise SystemExit(str(exc))
+    elif host not in ("127.0.0.1", "localhost", "::1"):
         print("warning: serving beyond localhost without --users; anyone who can reach it can review as anyone")
-    server = ThreadingHTTPServer((host, port), make_handler(store, users))
+    server = ThreadingHTTPServer((host, port), make_handler(store, accounts))
     url = f"http://{host}:{server.server_address[1]}/"
     print(f"FarhangBench review at {url} — reviews are saved to {reviews_dir}"
-          f"{' — sign-in required' if users else ''} (Ctrl+C to stop)", flush=True)
+          f"{' — sign-in required' if accounts else ''} (Ctrl+C to stop)", flush=True)
     if open_browser:
         threading.Timer(0.5, webbrowser.open, [url]).start()
     try:
@@ -396,17 +435,23 @@ table.kv td:first-child { color: var(--text-muted); white-space: nowrap; width: 
 .empty { color: var(--text-muted); padding: 50px 0; text-align: center; }
 .msg { margin: 10px 0; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--bad); color: var(--bad); }
 .welcome { max-width: 620px; } .welcome li { margin-bottom: 6px; }
+.form { display: grid; gap: 8px; max-width: 380px; } .form label { display: grid; gap: 3px; }
+.secret { margin: 10px 0; padding: 10px 12px; border-radius: 8px; background: var(--warn-soft); color: var(--text-primary); }
+.secret code { font-size: 16px; user-select: all; }
+.ok-msg { margin: 10px 0; padding: 8px 10px; border-radius: 6px; background: var(--good-soft); color: var(--good); }
 @media (max-width: 760px) { .layout { grid-template-columns: 1fr; } #list { max-height: 35vh; border-right: 0; border-bottom: 1px solid var(--border); } #main { padding: 14px 16px 40px; } }
 </style>
 </head>
 <body>
 <header>
   <h1>FarhangBench review <span>· بازبینی</span></h1>
-  <div class="tabs"><button id="t-review" class="on">Review</button><button id="t-progress">Progress</button></div>
+  <div class="tabs"><button id="t-review" class="on">Review</button><button id="t-progress">Progress</button><button id="t-people" style="display:none">People</button></div>
   <label class="controls">Your name <input id="who" placeholder="e.g. maryam" size="14" autocomplete="name"></label>
+  <button id="pw-btn" style="display:none" title="Change your password">Password</button>
   <div class="controls" id="filters">
     <select id="f-scope">
       <option value="native">Native items (FarhangScore)</option>
+      <option value="gated">Social norms: scored only after review</option>
       <option value="reference">Imported and derived (audit)</option>
       <option value="all">All items</option>
     </select>
@@ -426,15 +471,16 @@ table.kv td:first-child { color: var(--text-muted); white-space: nowrap; width: 
   <div id="main"></div>
 </div>
 <div id="progress-view" style="display:none; overflow:auto; padding: 18px 24px 60px; flex: 1"></div>
+<div id="people-view" style="display:none; overflow:auto; padding: 18px 24px 60px; flex: 1"></div>
 <script>
 const META = __META__;
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-const STATUS = { unreviewed: "Unreviewed", in_review: "In review", validated: "Validated", disputed: "Disputed", retired: "Retired" };
+const STATUS = { unreviewed: "Unreviewed", in_review: "In review", validated: "Validated", disputed: "Disputed", outdated: "Outdated", retired: "Retired" };
 let ITEMS = [], current = null, choice = null, verdict = null;
 const store = (k, v) => { try { v === undefined ? null : localStorage.setItem(k, v); return localStorage.getItem(k); } catch (e) { return null; } };
 $("who").value = store("farhang-reviewer") || "";
-let SIGNED_IN = false;
+let SIGNED_IN = false, ME = {};
 
 async function api(path, body) {
   const res = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {});
@@ -455,8 +501,8 @@ function initFilters() {
 }
 function filtered() {
   const scope = $("f-scope").value, show = $("f-show").value;
-  return ITEMS.filter(it => (scope === "all" || (scope === "native") === (it.source === "farhangbench"))
-    && it.status !== "retired"
+  return ITEMS.filter(it => (scope === "all" || (scope === "gated" ? it.gated : (scope === "native") === (it.source === "farhangbench")))
+    && it.status !== "retired" && it.status !== "outdated"
     && (!$("f-track").value || it.track === $("f-track").value) && (!$("f-task").value || it.task === $("f-task").value)
     && (show === "all" || (show === "todo" && !it.my_verdict) || (show === "mine" && it.my_verdict) || (show === "disputed" && it.status === "disputed")));
 }
@@ -478,6 +524,7 @@ function welcome() {
     <li><b>Answer first, without the key.</b> Pick or type the answer you believe is right, or press “I don't know”. Your first answer is saved and can't be changed. This is what makes the review independent.</li>
     <li><b>Then judge the key.</b> You'll see the official answer. Mark it correct, wrong or not sure, tick any problems, and leave a note or the right answer if you know it.</li>
     <li>An item counts towards the FarhangScore once two reviewers, other than its author, have answered and at least two thirds of them say the key is correct.</li>
+    <li><b>Judge for Iran today.</b> Customs change. If something was the norm once but isn't any more, mark the key wrong and tick “No longer the norm in Iran today”. Items most reviewers mark that way are dropped.</li>
   </ol><p class="muted">Use reliable sources (dictionaries, Ganjoor, Dehkhoda, Farhangestan) when you check a key. Don't ask an AI model: the point is a human check.</p>
   <p class="muted">Keys: 1–5 pick an option · Enter submit · after the key: C correct, W wrong, U not sure · Ctrl+Enter save and go to the next item.</p>
   ${who() ? `<button class="primary" id="go">Start with the first item</button>` : `<p><b>Type your name at the top to begin.</b></p>`}</div>`;
@@ -600,15 +647,15 @@ async function renderProgress() {
   const p = await api("/api/progress");
   const pct = v => v === null || v === undefined ? "–" : (100 * v).toFixed(0) + "%";
   const row = r => `<tr><td>${esc(r.group.replace("source:", ""))}</td><td class="num">${r.items || 0}</td><td class="num">${r.unreviewed || 0}</td>
-    <td class="num">${r.in_review || 0}</td><td class="num">${r.validated || 0}</td><td class="num">${r.disputed || 0}</td>
+    <td class="num">${r.in_review || 0}</td><td class="num">${r.validated || 0}</td><td class="num">${r.disputed || 0}</td><td class="num">${r.outdated || 0}</td>
     <td class="num">${pct(r.human_accuracy)}</td><td class="num">${r.blind_answers}</td></tr>`;
   const table = (title, rows) => `<h3>${title}</h3><table><thead><tr><th></th><th class="num">Items</th><th class="num">Unreviewed</th><th class="num">In review</th>
-    <th class="num">Validated</th><th class="num">Disputed</th><th class="num">Human accuracy</th><th class="num">Blind answers</th></tr></thead><tbody>${rows.map(row).join("")}</tbody></table>`;
+    <th class="num">Validated</th><th class="num">Disputed</th><th class="num">Outdated</th><th class="num">Human accuracy</th><th class="num">Blind answers</th></tr></thead><tbody>${rows.map(row).join("")}</tbody></table>`;
   const native = p.rows.filter(r => !r.group.startsWith("source:")), ref = p.rows.filter(r => r.group.startsWith("source:"));
   const tot = native.reduce((a, r) => { for (const k of ["items", "validated", "disputed"]) a[k] += r[k] || 0; return a; }, { items: 0, validated: 0, disputed: 0 });
   $("progress-view").innerHTML = `<div style="max-width:1000px"><h2 style="font-size:17px">Progress</h2>
     <p>${tot.validated} of ${tot.items} native items validated${tot.disputed ? `, ${tot.disputed} disputed` : ""}. Human accuracy is the share of blind answers that matched the key: a human baseline, and a warning sign when it is low.</p>
-    ${table("Native items by task", native)}${ref.some(r => r.blind_answers) ? table("Imported and derived sources (audit)", ref.filter(r => r.blind_answers)) : ""}
+    ${table("Native items by task", native)}${ref.some(r => r.blind_answers || r.review_required) ? table("Imported and derived sources (social norms count only once validated; others are audits)", ref.filter(r => r.blind_answers || r.review_required)) : ""}
     <h3>Reviewers</h3><p>${Object.entries(p.reviewers).map(([k, v]) => `${esc(k)} (${v})`).join(", ") || "No reviews yet."}
     · <a href="/api/export">Download all reviews (zip)</a> to commit them to <code>validation/</code></p>
     <h3>Disputed or flagged items, for authors to fix</h3>` + (p.problems.length ? `<table><thead><tr><th>Item</th><th>Status and flags</th><th>Reviewer notes</th></tr></thead><tbody>`
@@ -617,20 +664,91 @@ async function renderProgress() {
         <td>${x.comments.map(c => `<div><b>${esc(c.reviewer)}</b>: ${esc(c.verdict)}${c.suggested_answer ? ` — suggests <span dir="auto">${esc(c.suggested_answer)}</span>` : ""}${c.comment ? `<div class="fa" dir="auto">${esc(c.comment)}</div>` : ""}</div>`).join("")}</td></tr>`).join("")
       + "</tbody></table>" : `<p class="muted">None.</p>`) + `<p class="muted">Fix items in <code>python -m farhang browse</code>. Editing an item resets its reviews, because reviewers judged the old version.</p></div>`;
 }
+const VIEWS = ["review", "progress", "people"];
 function tab(name) {
-  $("t-review").classList.toggle("on", name === "review"); $("t-progress").classList.toggle("on", name === "progress");
+  VIEWS.forEach(v => $("t-" + v).classList.toggle("on", v === name));
   $("review-view").style.display = name === "review" ? "" : "none"; $("filters").style.display = name === "review" ? "" : "none";
   $("progress-view").style.display = name === "progress" ? "block" : "none";
+  $("people-view").style.display = name === "people" ? "block" : "none";
   if (name === "progress") renderProgress().catch(e => $("progress-view").innerHTML = `<div class="msg">${esc(e.message)}</div>`);
+  if (name === "people") renderPeople().catch(e => $("people-view").innerHTML = `<div class="msg">${esc(e.message)}</div>`);
 }
-$("t-review").onclick = () => tab("review"); $("t-progress").onclick = () => tab("progress");
+
+async function renderPeople(notice) {
+  const [users, progress] = await Promise.all([api("/api/users"), api("/api/progress")]);
+  const count = progress.reviewers || {};
+  const rows = users.map(u => `<tr><td><b>${esc(u.name)}</b>${u.name === ME.reviewer ? ' <span class="muted">(you)</span>' : ""}</td>
+    <td>${u.role === "admin" ? "Admin" : "Reviewer"}</td>
+    <td class="num">${count[u.name] || 0}</td>
+    <td>${!u.managed ? '<span class="muted">from the users Secret</span>' : u.must_change ? '<span class="chip in_review">waiting for first sign-in</span>' : '<span class="chip validated">active</span>'}</td>
+    <td class="muted">${u.created ? esc(u.created.slice(0, 10)) + (u.created_by ? " by " + esc(u.created_by) : "") : ""}</td>
+    <td>${u.managed && u.name !== ME.reviewer ? `<button data-act="reset" data-name="${esc(u.name)}">Reset password</button>
+      <button data-act="role" data-role="${u.role === "admin" ? "reviewer" : "admin"}" data-name="${esc(u.name)}">Make ${u.role === "admin" ? "reviewer" : "admin"}</button>
+      <button data-act="remove" data-name="${esc(u.name)}">Remove</button>` : ""}</td></tr>`).join("");
+  $("people-view").innerHTML = `<div style="max-width:1000px"><h2 style="font-size:17px">People</h2>
+    <p class="muted">Add a reviewer and send them the one-time password privately (not in a group chat). They choose their own password when they first sign in. Removing someone keeps their reviews.</p>
+    <div id="notice">${notice || ""}</div>
+    <h3>Add a person</h3>
+    <div class="controls"><input id="new-name" placeholder="Name, e.g. maryam" size="20" dir="auto">
+      <select id="new-role"><option value="reviewer">Reviewer</option><option value="admin">Admin (can manage people)</option></select>
+      <button class="primary" id="add-user">Add</button></div>
+    <h3>Accounts</h3>
+    <div class="wrap"><table><thead><tr><th>Name</th><th>Role</th><th class="num">Reviews</th><th>Status</th><th>Added</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+  $("add-user").onclick = () => people({ action: "add", name: $("new-name").value, role: $("new-role").value });
+  $("new-name").addEventListener("keydown", e => { if (e.key === "Enter") $("add-user").click(); });
+  document.querySelectorAll("#people-view button[data-act]").forEach(b => b.onclick = () => {
+    const { act, name, role } = b.dataset;
+    if (act === "remove" && !confirm(`Remove ${name}? Their reviews are kept.`)) return;
+    if (act === "reset" && !confirm(`Reset ${name}'s password? Their current password stops working.`)) return;
+    people({ action: act, name, role });
+  });
+}
+async function people(body) {
+  try {
+    const res = await api("/api/users", body);
+    const notice = res.password
+      ? `<div class="secret">One-time password for <b>${esc(res.name)}</b>: <code>${esc(res.password)}</code><br><span class="muted">Copy it now; it isn't shown again. Their sign-in name is <b>${esc(res.name)}</b>.</span></div>`
+      : `<div class="ok-msg">Done.</div>`;
+    await renderPeople(notice);
+  } catch (e) { $("notice").innerHTML = `<div class="msg">${esc(e.message)}</div>`; }
+}
+
+function passwordForm(forced) {
+  const host = forced ? $("main") : $("people-view");
+  if (!forced) { VIEWS.forEach(v => $("t-" + v).classList.remove("on")); ["review-view", "progress-view", "filters"].forEach(id => $(id).style.display = "none"); host.style.display = "block"; }
+  host.innerHTML = `<div class="welcome"><h2>${forced ? "Choose your password" : "Change your password"}</h2>
+    ${forced ? `<p>Welcome, <b>${esc(ME.reviewer)}</b>. You signed in with a one-time password; choose your own to continue.</p>` : ""}
+    <div class="form"><label>New password (at least 10 characters)<input type="password" id="pw1" autocomplete="new-password"></label>
+    <label>Again<input type="password" id="pw2" autocomplete="new-password"></label>
+    <div><button class="primary" id="pw-save">Save password</button></div></div><div id="err"></div></div>`;
+  $("pw1").focus();
+  $("pw-save").onclick = async () => {
+    if ($("pw1").value !== $("pw2").value) return showErr("The two passwords differ.");
+    try {
+      await api("/api/password", { new_password: $("pw1").value });
+      host.innerHTML = `<div class="welcome"><div class="ok-msg">Password saved.</div><p>Your browser will now ask you to sign in again: use the name <b>${esc(ME.reviewer)}</b> and your new password.</p><button class="primary" onclick="location.reload()">Sign in again</button></div>`;
+    } catch (e) { showErr(e.message); }
+  };
+}
+
+$("t-review").onclick = () => tab("review"); $("t-progress").onclick = () => tab("progress"); $("t-people").onclick = () => tab("people");
+$("pw-btn").onclick = () => passwordForm(false);
 $("who").addEventListener("change", async () => { store("farhang-reviewer", who()); current = null; await reload(); welcome(); });
 ["f-scope", "f-task", "f-show"].forEach(id => $(id).addEventListener("input", renderList));
 $("f-track").addEventListener("input", () => { $("f-task").value = ""; initFilters(); renderList(); });
 (async () => {
   try {
-    const me = await api("/api/whoami");
-    if (me.signed_in) { SIGNED_IN = true; $("who").value = me.reviewer; $("who").readOnly = true; $("who").title = "Signed in"; }
+    ME = await api("/api/whoami");
+    if (ME.signed_in) {
+      SIGNED_IN = true; $("who").value = ME.reviewer; $("who").readOnly = true; $("who").title = "Signed in";
+      if (ME.can_change_password) $("pw-btn").style.display = "";
+      if (ME.role === "admin") $("t-people").style.display = "";
+      if (ME.must_change) {
+        ["filters", "list"].forEach(id => $(id).style.display = "none"); $("review-view").style.gridTemplateColumns = "1fr";
+        document.querySelector(".tabs").style.display = "none"; $("pw-btn").style.display = "none";
+        return passwordForm(true);
+      }
+    }
   } catch (e) { /* older server */ }
   initFilters(); welcome(); reload();
 })();

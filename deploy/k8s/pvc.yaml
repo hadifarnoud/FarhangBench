@@ -1,4 +1,5 @@
-# Reviews (validation/*.jsonl). Small, but they are the only state: back them up (deploy/README.md).
+# Reviews (validation/*.jsonl) and reviewer accounts (accounts.json). Small, but they are the only state:
+# back them up (deploy/README.md).
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

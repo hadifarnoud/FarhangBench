@@ -3,7 +3,7 @@ kind: Deployment
 metadata:
   name: farhangbench-review
 spec:
-  # One writer: reviews are appended to files on a ReadWriteOnce volume, so never run two pods at once.
+  # One writer: reviews and accounts are files on a ReadWriteOnce volume, so never run two pods at once.
   replicas: 1
   strategy:
     type: Recreate
@@ -33,6 +33,8 @@ spec:
           env:
             - name: FARHANG_USERS_FILE
               value: /etc/farhang/users
+            - name: FARHANG_ACCOUNTS_FILE
+              value: /var/lib/farhang/accounts.json
           readinessProbe:
             httpGet:
               path: /healthz
@@ -57,13 +59,13 @@ spec:
             capabilities:
               drop: ["ALL"]
           volumeMounts:
-            - name: reviews
-              mountPath: /app/validation
+            - name: state
+              mountPath: /var/lib/farhang
             - name: users
               mountPath: /etc/farhang
               readOnly: true
       volumes:
-        - name: reviews
+        - name: state
           persistentVolumeClaim:
             claimName: farhangbench-reviews
         - name: users

@@ -19,8 +19,8 @@ images:
     newName: ghcr.io/hadifarnoud/farhangbench-review
     newTag: latest  # pin to a commit tag (sha-xxxxxxx) for reproducible deploys
 
-# Reviewer accounts: one "name:hash" line each, from `python -m farhang review-user NAME`.
-# The file is gitignored; the Secret's name gets a content hash, so editing it rolls the pod.
+# Admin accounts: one "name:hash" line each, from `python -m farhang review-user NAME`. Admins add reviewers in
+# the page's People tab (stored on the volume). The file is gitignored; editing it rolls the pod.
 secretGenerator:
   - name: farhangbench-review-users
     files:

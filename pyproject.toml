@@ -15,6 +15,7 @@ dependencies = []
 anthropic = ["anthropic"]
 import = ["pyarrow"]  # only for tools/import_external.py
 validate = ["jsonschema>=4"]
+hazm = ["hazm==0.12.1"]  # lemma-based fallback for short answers (farhang.normalize.lemma_match)
 
 [project.scripts]
 farhang = "farhang.cli:main"

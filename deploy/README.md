@@ -85,4 +85,4 @@ Then `python -m farhang review --summary` and `python -m farhang report` use the
   - Sign-in is HTTP Basic auth, so serve it over HTTPS only (the Ingress redirects HTTP).
   - The answer key of an item is sent only after the signed-in reviewer has submitted a blind answer to it.
 - **Health.** `/healthz` needs no sign-in, and both probes use it.
-- **Resources.** The pod uses about 50 MiB and handles a request in about 0.3 s, because it reloads all 6,999 items so that a new image's data is always current. The requests and limits leave plenty of room.
+- **Resources.** The pod uses about 50 MiB and handles a request in about 0.3 s, because it reloads all 8,739 items so that a new image's data is always current. The requests and limits leave plenty of room.

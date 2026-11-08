@@ -53,6 +53,16 @@ class StatusRulesTest(unittest.TestCase):
         st = item_status(item, {"maryam": review("correct"), "ali": review("correct")})
         self.assertEqual((st["status"], st["verdicts"]), ("in_review", 1))
 
+    def test_dataset_authors_do_not_validate_their_own_source(self):
+        item = {"id": "x-isn-2", "metadata": {"status": "imported", "source": "isn"}}
+        reviews = {"hamidreza-saffari": dict(review("correct"), flags=["outdated"]), "ali": review("correct")}
+        st = item_status(item, reviews)
+        self.assertEqual((st["status"], st["verdicts"], st["reviewers"]), ("in_review", 1, ["ali"]))
+        self.assertEqual(st["flags"], ["outdated"])  # the author's flag is still reported
+        self.assertEqual(item_status(item, dict(reviews, sara=review("correct")))["status"], "validated")
+        other = {"id": "x-percul-1", "metadata": {"status": "imported", "source": "percul"}}
+        self.assertEqual(item_status(other, reviews)["verdicts"], 2)  # only ISN's own authors are excluded
+
     def test_retired(self):
         item = {"id": "L1-0001", "metadata": {"status": "retired"}}
         self.assertEqual(item_status(item, {"a": review("correct"), "b": review("correct")})["status"], "retired")

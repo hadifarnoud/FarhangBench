@@ -168,6 +168,28 @@ class ExternalConverterTest(unittest.TestCase):
         self.assertIn("فرد: زن، ازدواج نکرده", by_id["x-isn-4"]["prompt"])
         self.assertEqual(by_id["x-isn-4"]["task"], "C3_etiquette_norms")
 
+    def test_parsbench_shuffles_options_and_skips_off_scope_topics(self):
+        path = self.tmp / "pb.xlsx"
+        opt = lambda *xs: json.dumps({"text": list(xs)}, ensure_ascii=False)
+        rows = [["", "MCQ", "Idioms", "معنی «یک کلاغ چهل کلاغ» چیست؟", "A", opt("بزرگ‌نمایی", "حسادت", "سکوت")],
+                ["", "C", "Festivals and celebrations ", "شب یلداست", "A", opt("الف: فال حافظ", "ب: سبزه", "ج: کدو")],
+                ["", "MCQ", "Religions", "دعای جوشن کبیر در چه شبی خوانده می‌شود؟", "\nA", opt("شب قدر", "عید قربان", "عاشورا")],
+                ["", "MCQ", "Banking", "دفترچه حساب چیست؟", "A", opt("سند", "کارت", "بیمه")],
+                ["", "MCQ", "Idioms", "بی‌پاسخ", "", opt("x", "y", "z")],
+                ["", "MCQ", "Idioms", "گزینه تکراری", "A", opt("x", "x", "z")]]
+        write_xlsx(path, ["", "TYPE", "sub_topic", "Hypothesis", "GoldenA", "OPT"], rows)
+        with mock.patch.object(external, "_gh", lambda path, **kw: self.tmp / "pb.xlsx"), \
+                mock.patch.object(external, "PARSBENCH_EXCLUDE", set()):
+            items = external.load_parsbench()
+        self.assert_items_ok(items, 3)  # banking (off-scope), a blank key and duplicate options are dropped
+        by_id = {i["id"]: i for i in items}
+        idiom, yalda = by_id["x-parsbench-0000"], by_id["x-parsbench-0001"]
+        self.assertEqual(idiom["options"][idiom["answer"]["index"]], "بزرگ‌نمایی")
+        self.assertEqual(sorted(yalda["options"]), sorted(["فال حافظ", "سبزه", "کدو"]))  # "الف:" labels stripped
+        self.assertTrue(yalda["prompt"].startswith("موقعیت: شب یلداست"))
+        self.assertEqual(yalda["task"], "C1_calendar_festivals")
+        self.assertIn("x-parsbench_contested-0002", by_id)
+
     def test_xlsx_numbers_become_ids(self):
         self.assertEqual(external._int("2.0"), "2")
 

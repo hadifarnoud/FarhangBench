@@ -7,3 +7,6 @@ results/
 
 # Reviewer accounts for the k8s deployment (password hashes)
 deploy/k8s/users
+
+# Gated datasets imported locally with the user's own access (e.g. Khayyam Challenge); never commit them
+data/gated/

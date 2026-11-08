@@ -44,7 +44,7 @@ There are two kinds of account:
 
   The People tab can also reset a forgotten password (a new one-time password), change someone's role, or remove them. Removing an account keeps the reviews it wrote. Reviewers can change their own password with the *Password* button.
 
-A person's sign-in name is also their reviewer id (`validation/<name>.jsonl`). Item authors can't validate their own items: set `metadata.author` on an item to the author's reviewer name.
+A person's sign-in name is also their reviewer id (`validation/<name>.jsonl`). Item authors can't validate their own items: set `metadata.author` on an item to the author's reviewer name. For imported datasets, `authors` in `config/sources.json` lists their authors' reviewer names (ISN: `hamidreza-saffari`, `mohammadamin-shafiei`, `donya-rooein`, `francesco-pierri`, `debora-nozza`). Give those people exactly these sign-in names: they can still review and flag that dataset's items, but their verdicts don't count towards validation.
 
 ## 3. Configure and apply
 

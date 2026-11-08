@@ -13,3 +13,4 @@ tests
 tools
 *.md
 !data/**/*.md
+data/gated

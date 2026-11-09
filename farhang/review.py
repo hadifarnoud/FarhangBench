@@ -235,16 +235,17 @@ def export_zip(reviews_dir):
     return buf.getvalue()
 
 
-def make_handler(store, accounts=None, sessions=None, secure_cookies=False):
+def make_handler(store, accounts=None, sessions=None, audit=None, secure_cookies=False):
     """Request handler. With ``accounts`` (a ``farhang.accounts.Accounts``) API routes need sign-in: the
     ``fb_session`` cookie from /api/login, or ``Authorization: Basic`` for scripts. Never sends ``WWW-Authenticate``,
     so browsers show the in-page login form instead of the Basic-auth popup. Nothing sends an item's key before the
-    reviewer's blind answer.
+    reviewer's blind answer. ``audit`` records admin and sign-in events; in-memory unless ``serve`` put it on disk.
     """
-    from .accounts import AccountError
+    from .accounts import AccountError, AuditLog
     from .sessions import Sessions
 
     sessions = sessions or Sessions()  # in-memory when the server was made without a state directory
+    audit = audit if audit is not None else AuditLog()
     attempts = _LoginAttempts()
 
     class Handler(BaseHTTPRequestHandler):
@@ -334,16 +335,21 @@ def make_handler(store, accounts=None, sessions=None, secure_cookies=False):
             user = accounts.verify_credentials(name, str(body.get("password", ""))) if name else None
             if not user:
                 attempts.failure(name, ip)
+                audit.record(name, "login_failed", name)
                 return self._json(401, {"error": "wrong name or password"})
             attempts.success(name)
             accounts.record_login(name)
+            audit.record(name, "login", name)
             token = sessions.create(name, ip, self.headers.get("User-Agent", ""))
             return self._json(200, {"ok": True, "user": self._whoami(user)}, extra=self._cookie_headers(token))
 
         def _logout(self):
             token = self._session_token()
             if token:
+                name = sessions.get(token)
                 sessions.revoke(token)
+                if name:
+                    audit.record(name, "logout", name)
             self._json(200, {"ok": True}, extra=self._cookie_headers(None))
 
         # ---------------------------------------------------------- routes
@@ -368,10 +374,15 @@ def make_handler(store, accounts=None, sessions=None, secure_cookies=False):
             reviewer = user.get("name") or reviewer_slug(qs.get("reviewer", ""))
             if user.get("must_change"):
                 return self._json(403, {"error": "choose a new password first", "must_change": True})
-            if url.path == "/api/users":
+            if url.path in ("/api/users", "/api/admin/users"):
                 if user.get("role") != "admin":
                     return self._json(403, {"error": "admins only"})
                 return self._json(200, accounts.list())
+            if url.path == "/api/admin/audit":
+                if user.get("role") != "admin":
+                    return self._json(403, {"error": "admins only"})
+                return self._json(200, audit.query(limit=int(qs.get("limit", 50)), offset=int(qs.get("offset", 0)),
+                                                   actor=qs.get("actor") or None, action=qs.get("action") or None))
             if url.path == "/api/export":
                 data = export_zip(store.reviews_dir)
                 return self._send(200, data, "application/zip",
@@ -420,25 +431,35 @@ def make_handler(store, accounts=None, sessions=None, secure_cookies=False):
                         raise AccountError("the current password is wrong")
                     accounts.change_password(user["name"], str(body.get("new_password", "")))
                     sessions.revoke_user(user["name"], except_token=user.get("_token"))
+                    audit.record(user["name"], "password_change", user["name"])
                     return self._json(200, {"ok": True})
                 if user.get("must_change"):
                     return self._json(403, {"error": "choose a new password first", "must_change": True})
-                if url.path == "/api/users":
+                if url.path in ("/api/users", "/api/admin/users"):
                     if user.get("role") != "admin":
                         return self._json(403, {"error": "admins only"})
                     action, name = body.get("action"), reviewer_slug(body.get("name", ""))
                     if action == "add":
-                        name, password = accounts.add(body.get("name", ""), body.get("role", "reviewer"), user["name"])
+                        name, password = accounts.add(
+                            body.get("name", ""), body.get("role", "reviewer"), user["name"],
+                            password=body.get("password"), display_name=str(body.get("display_name", "")),
+                            must_change=body.get("must_change") if "must_change" in body else None)
                         return self._json(200, {"name": name, "password": password})
                     if action == "reset":
                         return self._json(200, {"name": name, "password": accounts.reset(name, user["name"])})
                     if action == "role":
                         accounts.set_role(name, body.get("role"), user["name"])
                         return self._json(200, {"ok": True})
+                    if action in ("disable", "enable"):
+                        accounts.set_disabled(name, action == "disable", user["name"])
+                        return self._json(200, {"ok": True})
+                    if action == "rename":
+                        accounts.set_display_name(name, str(body.get("display_name", "")), user["name"])
+                        return self._json(200, {"ok": True})
                     if action == "remove":
                         accounts.remove(name, user["name"])
                         return self._json(200, {"ok": True})
-                    raise ValueError("action must be add, reset, role or remove")
+                    raise ValueError("action must be add, reset, role, disable, enable, remove or rename")
                 reviewer = user.get("name") or reviewer_slug(body.get("reviewer", ""))
                 if not reviewer:
                     raise ValueError("reviewer name required")
@@ -461,20 +482,22 @@ def make_handler(store, accounts=None, sessions=None, secure_cookies=False):
 
 def serve(data_dir, reviews_dir=REVIEWS_DIR, host="127.0.0.1", port=8766, open_browser=True, users_file=None,
           accounts_file=None, secure_cookies=False):
-    from .accounts import AccountError, Accounts
+    from .accounts import AccountError, Accounts, AuditLog
     from .sessions import Sessions
     store = ReviewStore(data_dir, reviews_dir)
     accounts = Accounts(accounts_file, users_file) if (users_file or accounts_file) else None
     state_dir = Path(accounts_file).parent if accounts_file else None  # the volume next to accounts.json
     sessions = Sessions(state_dir / "sessions.json" if state_dir else None)
+    audit = AuditLog(state_dir / "audit.jsonl" if state_dir else None)
     if accounts is not None:
+        accounts.sessions, accounts.audit = sessions, audit
         try:
             accounts.check_startup()
         except AccountError as exc:
             raise SystemExit(str(exc))
     elif host not in ("127.0.0.1", "localhost", "::1"):
         print("warning: serving beyond localhost without --users; anyone who can reach it can review as anyone")
-    server = ThreadingHTTPServer((host, port), make_handler(store, accounts, sessions, secure_cookies))
+    server = ThreadingHTTPServer((host, port), make_handler(store, accounts, sessions, audit, secure_cookies))
     url = f"http://{host}:{server.server_address[1]}/"
     print(f"FarhangBench review at {url} — reviews are saved to {reviews_dir}"
           f"{' — sign-in required' if accounts else ''} (Ctrl+C to stop)", flush=True)

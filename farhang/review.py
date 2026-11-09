@@ -1,13 +1,20 @@
 """A local web page for human validation of benchmark items: ``python -m farhang review``.
 
 Each reviewer answers an item blind, then sees the answer key and judges it. The server never sends an item's
-key before that reviewer's blind answer is recorded, and the first blind answer cannot be changed. Reviews are
-appended to ``validation/<reviewer>.jsonl`` (see ``farhang.validation``), which are plain files to commit.
+key before that reviewer's blind answer is recorded — except the admin audit view of an item
+(``GET /api/admin/items/<id>``), which records and audits a "peek" after which that admin's blind answer is
+refused. The first blind answer cannot be changed. Reviews are appended to ``validation/<reviewer>.jsonl`` (see
+``farhang.validation``), which are plain files to commit.
 
-Locally, reviewers type their name. For a shared deployment (``deploy/``), pass ``--users`` (admin accounts, one
-line each from ``python -m farhang review-user``) and ``--accounts`` (a writable file for the reviewer accounts that
-admins manage in the People tab; see ``farhang.accounts``). Every request then needs HTTP Basic auth, and the
-signed-in account is the reviewer, so nobody can answer or peek at keys under someone else's name.
+Locally, reviewers type their name and everyone can use the admin views. For a shared deployment (``deploy/``),
+pass ``--users`` (admin accounts, one line each from ``python -m farhang review-user``) and ``--accounts`` (a
+writable file for the reviewer accounts that admins manage in the People tab; see ``farhang.accounts``). Sign-in
+is then a cookie session from the in-page login form (``farhang.sessions``, cookie ``fb_session``); HTTP Basic
+auth still works for scripts, and ``WWW-Authenticate`` is never sent, so browsers can't show the Basic-auth
+popup. The signed-in account is the reviewer, so nobody can answer or peek at keys under someone else's name.
+
+The page and its assets come from ``farhang/review_ui/``: ``GET /`` serves ``index.html`` with the ``__META__``
+block filled in, and ``GET /static/<name>`` serves its JavaScript and CSS (whitelist, ``no-cache``).
 
 The default queue is native items (the ones the FarhangScore is built from); any imported or derived source can be
 reviewed too, as an audit.

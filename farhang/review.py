@@ -101,14 +101,32 @@ class Peeks:
 
 
 class _LoginAttempts:
-    """In-memory rate limit for sign-in: 5 failed tries per name or 30 per IP in 15 minutes means wait."""
+    """In-memory rate limit for sign-in: 5 failed tries per name or 30 per IP in 15 minutes means wait.
+    The counters are pruned of expired entries on every call and capped at MAX_KEYS keys, so a spray of
+    arbitrary names or source IPs can't grow them without bound."""
 
     WINDOW = 15 * 60
     PER_NAME, PER_IP = 5, 30
+    AUDIT_AFTER = 60  # at most one login_failed audit row per name per minute
+    MAX_KEYS = 10_000
 
     def __init__(self):
         self._lock = threading.Lock()
-        self._by_name, self._by_ip = defaultdict(list), defaultdict(list)
+        self._by_name, self._by_ip, self._audited = defaultdict(list), defaultdict(list), {}
+
+    def _prune(self, now):
+        """Drop expired hits in every counter dict, then whole keys past MAX_KEYS (least recent first)."""
+        for d in (self._by_name, self._by_ip):
+            for key in [k for k, hits in d.items() if not hits or now - hits[-1] >= self.WINDOW]:
+                d.pop(key, None)
+            if len(d) > self.MAX_KEYS:
+                for key in sorted(d, key=lambda k: d[k][-1] if d[k] else 0)[:len(d) - self.MAX_KEYS]:
+                    d.pop(key, None)
+        for key in [k for k, t in self._audited.items() if now - t >= self.AUDIT_AFTER]:
+            self._audited.pop(key, None)
+        if len(self._audited) > self.MAX_KEYS:
+            for key in sorted(self._audited, key=self._audited.get)[:len(self._audited) - self.MAX_KEYS]:
+                self._audited.pop(key, None)
 
     def _remaining_wait(self, hits, limit, now):
         hits[:] = [t for t in hits if now - t < self.WINDOW]
@@ -120,18 +138,26 @@ class _LoginAttempts:
         """0 if a login try may go ahead, else how many seconds to wait before trying again."""
         with self._lock:
             now = time.time()
+            self._prune(now)
             return max(self._remaining_wait(self._by_name[name], self.PER_NAME, now),
                        self._remaining_wait(self._by_ip[ip], self.PER_IP, now))
 
     def failure(self, name, ip):
+        """Note a failed try; True when a ``login_failed`` audit row should be written for it (throttled)."""
         with self._lock:
             now = time.time()
+            self._prune(now)
             self._by_name[name].append(now)
             self._by_ip[ip].append(now)
+            if now - self._audited.get(name, 0) >= self.AUDIT_AFTER:
+                self._audited[name] = now
+                return True
+            return False
 
     def success(self, name):
         with self._lock:
             self._by_name.pop(name, None)
+            self._audited.pop(name, None)
 
 _lock = threading.Lock()
 _BLIND_KEYS = ("id", "track", "task", "format", "lang", "context", "prompt", "options", "labels", "images")
@@ -485,8 +511,9 @@ def make_handler(store, accounts=None, sessions=None, audit=None, secure_cookies
             return ""
 
         def _client_ip(self):
-            forwarded = (self.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
-            return forwarded or self.client_address[0]
+            # The last X-Forwarded-For entry is the one our own proxy appended; earlier ones are client-controlled.
+            forwarded = [p.strip() for p in (self.headers.get("X-Forwarded-For") or "").split(",") if p.strip()]
+            return forwarded[-1] if forwarded else self.client_address[0]
 
         def _basic_user(self):
             """HTTP Basic credentials for scripts, through the same rate limiter and audit as /api/login.
@@ -504,8 +531,8 @@ def make_handler(store, accounts=None, sessions=None, audit=None, secure_cookies
                 raise _LoginBlocked(wait)
             user = accounts.authenticate(header)
             if not user:
-                attempts.failure(name, self._client_ip())
-                audit.record(name, "login_failed", name)
+                if attempts.failure(name, self._client_ip()):
+                    audit.record(name, "login_failed", name)
                 return None
             attempts.success(name)
             return user
@@ -590,8 +617,8 @@ def make_handler(store, accounts=None, sessions=None, audit=None, secure_cookies
                 return self._rate_limited(wait)
             user = accounts.verify_credentials(name, str(body.get("password", ""))) if name else None
             if not user:
-                attempts.failure(name, ip)
-                audit.record(name, "login_failed", name)
+                if attempts.failure(name, ip):
+                    audit.record(name, "login_failed", name)
                 return self._json(401, {"error": "wrong name or password"})
             attempts.success(name)
             accounts.record_login(name)

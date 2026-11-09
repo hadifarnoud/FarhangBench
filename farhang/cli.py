@@ -212,7 +212,7 @@ def cmd_review(args):
         print("\n".join(summary_lines(ReviewStore(Path(args.data), Path(args.reviews)))))
         return 0
     serve(Path(args.data), Path(args.reviews), host=args.host, port=args.port, open_browser=not args.no_open,
-          users_file=args.users, accounts_file=args.accounts)
+          users_file=args.users, accounts_file=args.accounts, secure_cookies=args.secure_cookies)
     return 0
 
 
@@ -331,6 +331,10 @@ def main(argv=None):
     p.add_argument("--accounts", default=os.environ.get("FARHANG_ACCOUNTS_FILE"),
                    help="writable JSON file for the reviewer accounts admins manage in the page. "
                         "Default: $FARHANG_ACCOUNTS_FILE")
+    p.add_argument("--secure-cookies", action="store_true",
+                   default=os.environ.get("FARHANG_SECURE_COOKIES", "").lower() in ("1", "true", "yes"),
+                   help="always mark the sign-in cookie Secure. Default: $FARHANG_SECURE_COOKIES; "
+                        "the cookie is also Secure whenever a proxy says the request arrived over https")
     p.set_defaults(func=cmd_review)
 
     p = sub.add_parser("review-user", help="print a users-file line (name:password hash) for an admin account")

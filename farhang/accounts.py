@@ -46,18 +46,26 @@ class Accounts:
     def _bootstrap_users(self):
         return self.bootstrap._load() if self.bootstrap else {}
 
-    def _read(self):
+    def _read_data(self):
         if not self.store_path or not self.store_path.is_file():
             return {}
-        return json.loads(self.store_path.read_text(encoding="utf-8")).get("users", {})
+        return json.loads(self.store_path.read_text(encoding="utf-8"))
 
-    def _write(self, users):
+    def _read(self):
+        return self._read_data().get("users", {})
+
+    def _write_data(self, data):
         if not self.store_path:
             raise AccountError("no accounts file configured (--accounts)")
         self.store_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.store_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"users": users}, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, self.store_path)  # atomic, so a crash never leaves a half-written file
+
+    def _write(self, users):
+        data = self._read_data()
+        data["users"] = users
+        self._write_data(data)
 
     def check_startup(self):
         """Raise AccountError unless at least one admin can sign in."""
@@ -71,8 +79,33 @@ class Accounts:
 
     # ------------------------------------------------------------ sign-in
 
+    def _lookup(self, name):
+        """(stored password hash, account info dict) for ``name``, or None: unknown, disabled or no such account."""
+        boot = self._bootstrap_users()
+        if name in boot:
+            info = {"name": name, "role": "admin", "must_change": False, "managed": False, "display_name": ""}
+            return boot[name], info
+        user = self._read().get(name)
+        if not user or user.get("disabled"):
+            return None
+        info = {"name": name, "role": user.get("role", "reviewer"), "must_change": bool(user.get("must_change")),
+                "managed": True, "display_name": user.get("display_name", "")}
+        return user["hash"], info
+
+    def info(self, name):
+        """The account info dict for ``name`` (used to resolve a session cookie), or None."""
+        found = self._lookup(name)
+        return found[1] if found else None
+
+    def verify_credentials(self, name, password):
+        """The account info dict for a correct name+password pair, else None (same for every failure)."""
+        found = self._lookup(reviewer_slug(name))
+        if found and verify_password(password, found[0]):
+            return found[1]
+        return None
+
     def authenticate(self, authorization):
-        """{'name', 'role', 'must_change', 'managed'} for valid Basic credentials, else None."""
+        """{'name', 'role', 'must_change', 'managed', ...} for valid Basic credentials, else None."""
         import base64
         if not authorization or not authorization.startswith("Basic "):
             return None
@@ -81,22 +114,34 @@ class Accounts:
         except (ValueError, UnicodeDecodeError):
             return None
         name = reviewer_slug(name)
-        boot = self._bootstrap_users()
-        if name in boot:
-            encoded, info = boot[name], {"name": name, "role": "admin", "must_change": False, "managed": False}
-        else:
-            user = self._read().get(name)
-            if not user:
-                return None
-            encoded = user["hash"]
-            info = {"name": name, "role": user.get("role", "reviewer"), "must_change": bool(user.get("must_change")),
-                    "managed": True}
+        found = self._lookup(name)
+        if not found:
+            return None
+        encoded, info = found
         token = hashlib.sha256(authorization.encode("utf-8")).hexdigest()
         # PBKDF2 is slow on purpose; skip it for credentials already checked against the same stored hash.
         if self._verified.get(token) == (name, encoded) or verify_password(password, encoded):
             self._verified[token] = (name, encoded)
             return info
         return None
+
+    def check_password(self, name, password):
+        """Whether ``password`` is ``name``'s current password (managed accounts only)."""
+        user = self._read().get(name)
+        return bool(user) and verify_password(password, user["hash"])
+
+    def record_login(self, name):
+        """Note a successful sign-in: ``last_login`` on a managed account, under ``bootstrap_meta`` otherwise."""
+        if not self.store_path:
+            return
+        with self._lock:
+            data = self._read_data()
+            users = data.get("users", {})
+            if name in users:
+                users[name]["last_login"] = _now()
+            else:
+                data.setdefault("bootstrap_meta", {}).setdefault(name, {})["last_login"] = _now()
+            self._write_data(data)
 
     # ------------------------------------------------------------ management (admins)
 

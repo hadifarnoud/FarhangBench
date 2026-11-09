@@ -17,6 +17,7 @@ import io
 import json
 import mimetypes
 import threading
+import time
 import webbrowser
 import zipfile
 from collections import Counter, defaultdict
@@ -30,6 +31,50 @@ from .taxonomy import NATIVE_SOURCE, TASKS, TRACKS
 from .weights import review_required_sources
 from .validation import (FLAGS, REVIEWS_DIR, VERDICTS, append_record, authors_of, blind_correct, content_hash,
                          item_status, load_records, merge_reviews, reviewer_slug)
+
+_SECURITY_HEADERS = [
+    ("X-Content-Type-Options", "nosniff"),
+    ("Referrer-Policy", "same-origin"),
+    ("X-Frame-Options", "DENY"),
+    ("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; "
+                               "frame-ancestors 'none'"),
+]
+SESSION_COOKIE = "fb_session"
+SESSION_COOKIE_MAX_AGE = 14 * 24 * 3600
+
+
+class _LoginAttempts:
+    """In-memory rate limit for sign-in: 5 failed tries per name or 30 per IP in 15 minutes means wait."""
+
+    WINDOW = 15 * 60
+    PER_NAME, PER_IP = 5, 30
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._by_name, self._by_ip = defaultdict(list), defaultdict(list)
+
+    def _remaining_wait(self, hits, limit, now):
+        hits[:] = [t for t in hits if now - t < self.WINDOW]
+        if len(hits) < limit:
+            return 0
+        return int(hits[-limit] + self.WINDOW - now) + 1
+
+    def allowed(self, name, ip):
+        """0 if a login try may go ahead, else how many seconds to wait before trying again."""
+        with self._lock:
+            now = time.time()
+            return max(self._remaining_wait(self._by_name[name], self.PER_NAME, now),
+                       self._remaining_wait(self._by_ip[ip], self.PER_IP, now))
+
+    def failure(self, name, ip):
+        with self._lock:
+            now = time.time()
+            self._by_name[name].append(now)
+            self._by_ip[ip].append(now)
+
+    def success(self, name):
+        with self._lock:
+            self._by_name.pop(name, None)
 
 _lock = threading.Lock()
 _BLIND_KEYS = ("id", "track", "task", "format", "lang", "context", "prompt", "options", "labels", "images")
@@ -181,58 +226,134 @@ def export_zip(reviews_dir):
     return buf.getvalue()
 
 
-def make_handler(store, accounts=None):
-    """Request handler; with ``accounts`` (a ``farhang.accounts.Accounts``) every route but /healthz needs a login."""
+def make_handler(store, accounts=None, sessions=None, secure_cookies=False):
+    """Request handler. With ``accounts`` (a ``farhang.accounts.Accounts``) API routes need sign-in: the
+    ``fb_session`` cookie from /api/login, or ``Authorization: Basic`` for scripts. Never sends ``WWW-Authenticate``,
+    so browsers show the in-page login form instead of the Basic-auth popup. Nothing sends an item's key before the
+    reviewer's blind answer.
+    """
     from .accounts import AccountError
+    from .sessions import Sessions
+
+    sessions = sessions or Sessions()  # in-memory when the server was made without a state directory
+    attempts = _LoginAttempts()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
 
-        def _user(self):
-            """The signed-in account (a dict), or None after sending a 401. Without accounts, an empty dict."""
+        # ---------------------------------------------------------- auth and headers
+
+        def _session_token(self):
+            for part in (self.headers.get("Cookie") or "").split(";"):
+                name, _, value = part.strip().partition("=")
+                if name == SESSION_COOKIE:
+                    return value
+            return ""
+
+        def _client_ip(self):
+            forwarded = (self.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+            return forwarded or self.client_address[0]
+
+        def _resolve_user(self):
+            """The signed-in account dict (+ the session token as ``_token``), or None."""
             if accounts is None:
                 return {}
-            user = accounts.authenticate(self.headers.get("Authorization"))
+            token = self._session_token()
+            if token:
+                name = sessions.get(token)
+                if name:
+                    user = accounts.info(name)
+                    if user:
+                        user["_token"] = token
+                        return user
+                    sessions.revoke(token)  # account gone or disabled; drop the cookie's session
+            return accounts.authenticate(self.headers.get("Authorization"))
+
+        def _user(self):
+            """The signed-in account, or None after sending a 401. Never sends WWW-Authenticate (popup trigger)."""
+            user = self._resolve_user()
             if user is None:
-                body = b'{"error": "sign in required"}'
-                self.send_response(401)
-                self.send_header("WWW-Authenticate", 'Basic realm="FarhangBench review", charset="UTF-8"')
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                self._json(401, {"error": "sign in required"})
             return user
 
-        def _send(self, code, body, ctype="application/json; charset=utf-8"):
+        def _cookie_headers(self, token=None):
+            value = f"{SESSION_COOKIE}={token}" if token else f"{SESSION_COOKIE}=; Max-Age=0"
+            parts = [value, "HttpOnly", "SameSite=Strict", "Path=/"]
+            if token:
+                parts.append(f"Max-Age={SESSION_COOKIE_MAX_AGE}")
+            if secure_cookies or self.headers.get("X-Forwarded-Proto") == "https":
+                parts.append("Secure")
+            return [("Set-Cookie", "; ".join(parts))]
+
+        def _send(self, code, body, ctype="application/json; charset=utf-8", extra=()):
             data = body if isinstance(body, bytes) else body.encode("utf-8")
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
-            self.send_header("Cache-Control", "no-store")
+            for header, value in [*_SECURITY_HEADERS, *extra]:
+                self.send_header(header, value)
+            if ctype.startswith(("image/", "application/zip")):
+                self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(data)
 
-        def _json(self, code, obj):
-            self._send(code, json.dumps(obj, ensure_ascii=False))
+        def _json(self, code, obj, extra=()):
+            self._send(code, json.dumps(obj, ensure_ascii=False), extra=extra)
+
+        # ---------------------------------------------------------- sign-in endpoints
+
+        def _whoami(self, user):
+            if accounts is None:
+                return {"signed_in": False, "auth_enabled": False, "reviewer": None, "role": "admin",
+                        "must_change": False, "can_change_password": False, "local": True}
+            if not user:
+                return {"signed_in": False, "auth_enabled": True, "reviewer": None, "role": None,
+                        "must_change": False, "can_change_password": False, "local": False}
+            return {"signed_in": True, "auth_enabled": True, "reviewer": user["name"], "role": user.get("role"),
+                    "must_change": user.get("must_change", False), "can_change_password": user.get("managed", False),
+                    "local": False, "display_name": user.get("display_name", "")}
+
+        def _login(self, body):
+            if accounts is None:
+                return self._json(400, {"error": "this server has no accounts; sign-in isn't used"})
+            name = reviewer_slug(str(body.get("name", "")))
+            ip = self._client_ip()
+            wait = attempts.allowed(name, ip)
+            if wait:
+                return self._json(429, {"error": "too many failed tries; wait and try again", "retry_after": wait})
+            user = accounts.verify_credentials(name, str(body.get("password", ""))) if name else None
+            if not user:
+                attempts.failure(name, ip)
+                return self._json(401, {"error": "wrong name or password"})
+            attempts.success(name)
+            accounts.record_login(name)
+            token = sessions.create(name, ip, self.headers.get("User-Agent", ""))
+            return self._json(200, {"ok": True, "user": self._whoami(user)}, extra=self._cookie_headers(token))
+
+        def _logout(self):
+            token = self._session_token()
+            if token:
+                sessions.revoke(token)
+            self._json(200, {"ok": True}, extra=self._cookie_headers(None))
+
+        # ---------------------------------------------------------- routes
 
         def do_GET(self):
             url = urlparse(self.path)
             if url.path == "/healthz":
                 return self._send(200, "ok", "text/plain; charset=utf-8")
-            user = self._user()
-            if user is None:
-                return
             qs = {k: v[0] for k, v in parse_qs(url.query).items()}
-            reviewer = user.get("name") or reviewer_slug(qs.get("reviewer", ""))
-            if url.path == "/":
+            if url.path == "/api/whoami":
+                return self._json(200, self._whoami(self._resolve_user()))
+            if url.path == "/":  # the page itself is public; its data routes are not
                 return self._send(200, PAGE.replace("__META__", json.dumps(
                     {"tracks": {k: v[2] for k, v in TRACKS.items()}, "tasks": TASKS, "flags": FLAGS},
                     ensure_ascii=False)), "text/html; charset=utf-8")
-            if url.path == "/api/whoami":
-                return self._json(200, {"reviewer": user.get("name"), "signed_in": accounts is not None,
-                                        "role": user.get("role"), "must_change": user.get("must_change", False),
-                                        "can_change_password": user.get("managed", False)})
+            user = self._user()
+            if user is None:
+                return
+            reviewer = user.get("name") or reviewer_slug(qs.get("reviewer", ""))
             if user.get("must_change"):
                 return self._json(403, {"error": "choose a new password first", "must_change": True})
             if url.path == "/api/users":
@@ -240,13 +361,9 @@ def make_handler(store, accounts=None):
                     return self._json(403, {"error": "admins only"})
                 return self._json(200, accounts.list())
             if url.path == "/api/export":
-                self.send_response(200)
                 data = export_zip(store.reviews_dir)
-                self.send_header("Content-Type", "application/zip")
-                self.send_header("Content-Disposition", 'attachment; filename="farhangbench-reviews.zip"')
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                return self.wfile.write(data)
+                return self._send(200, data, "application/zip",
+                                  extra=[("Content-Disposition", 'attachment; filename="farhangbench-reviews.zip"')])
             if url.path == "/api/items":
                 if not reviewer:
                     return self._json(400, {"error": "reviewer name required"})
@@ -270,19 +387,31 @@ def make_handler(store, accounts=None):
             # A JSON content type can't be sent by a plain cross-site form, which backs up the origin check.
             if not (self.headers.get("Content-Type") or "").startswith("application/json"):
                 return self._json(415, {"error": "send JSON"})
+            url = urlparse(self.path)
+            try:
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                return self._json(400, {"error": "bad request: the body must be JSON"})
+            if url.path == "/api/login":
+                return self._login(body if isinstance(body, dict) else {})
+            if url.path == "/api/logout":
+                return self._logout()
             user = self._user()
             if user is None:
                 return
             try:
-                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode("utf-8"))
-                if self.path == "/api/password":
+                if url.path == "/api/password":
                     if not user.get("managed"):
                         raise AccountError("this account comes from the users Secret; change it there")
-                    accounts.change_password(user["name"], body.get("new_password", ""))
+                    current = str(body.get("current_password", ""))
+                    if not user.get("must_change") and not accounts.check_password(user["name"], current):
+                        raise AccountError("the current password is wrong")
+                    accounts.change_password(user["name"], str(body.get("new_password", "")))
+                    sessions.revoke_user(user["name"], except_token=user.get("_token"))
                     return self._json(200, {"ok": True})
                 if user.get("must_change"):
                     return self._json(403, {"error": "choose a new password first", "must_change": True})
-                if self.path == "/api/users":
+                if url.path == "/api/users":
                     if user.get("role") != "admin":
                         return self._json(403, {"error": "admins only"})
                     action, name = body.get("action"), reviewer_slug(body.get("name", ""))
@@ -301,9 +430,9 @@ def make_handler(store, accounts=None):
                 reviewer = user.get("name") or reviewer_slug(body.get("reviewer", ""))
                 if not reviewer:
                     raise ValueError("reviewer name required")
-                if self.path == "/api/blind":
+                if url.path == "/api/blind":
                     return self._json(200, store.record_blind(reviewer, body["item_id"], body.get("answer")))
-                if self.path == "/api/verdict":
+                if url.path == "/api/verdict":
                     return self._json(200, store.record_verdict(
                         reviewer, body["item_id"], body.get("verdict"), body.get("flags", []),
                         body.get("comment", ""), body.get("suggested_answer", "")))
@@ -319,10 +448,13 @@ def make_handler(store, accounts=None):
 
 
 def serve(data_dir, reviews_dir=REVIEWS_DIR, host="127.0.0.1", port=8766, open_browser=True, users_file=None,
-          accounts_file=None):
+          accounts_file=None, secure_cookies=False):
     from .accounts import AccountError, Accounts
+    from .sessions import Sessions
     store = ReviewStore(data_dir, reviews_dir)
     accounts = Accounts(accounts_file, users_file) if (users_file or accounts_file) else None
+    state_dir = Path(accounts_file).parent if accounts_file else None  # the volume next to accounts.json
+    sessions = Sessions(state_dir / "sessions.json" if state_dir else None)
     if accounts is not None:
         try:
             accounts.check_startup()
@@ -330,7 +462,7 @@ def serve(data_dir, reviews_dir=REVIEWS_DIR, host="127.0.0.1", port=8766, open_b
             raise SystemExit(str(exc))
     elif host not in ("127.0.0.1", "localhost", "::1"):
         print("warning: serving beyond localhost without --users; anyone who can reach it can review as anyone")
-    server = ThreadingHTTPServer((host, port), make_handler(store, accounts))
+    server = ThreadingHTTPServer((host, port), make_handler(store, accounts, sessions, secure_cookies))
     url = f"http://{host}:{server.server_address[1]}/"
     print(f"FarhangBench review at {url} — reviews are saved to {reviews_dir}"
           f"{' — sign-in required' if accounts else ''} (Ctrl+C to stop)", flush=True)

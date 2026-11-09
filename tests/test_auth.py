@@ -78,9 +78,13 @@ class SignedInServerTest(unittest.TestCase):
 
     def test_login_required_except_health(self):
         self.assertEqual(self.call("/healthz")[0], 200)
-        code, _, headers = self.call("/")
-        self.assertEqual(code, 401)
-        self.assertIn("Basic", headers["WWW-Authenticate"])
+        code, body, headers = self.call("/")  # the page itself is public; it shows the sign-in form
+        self.assertEqual(code, 200)
+        self.assertIn(b"FarhangBench review", body)
+        self.assertIsNone(headers["WWW-Authenticate"])  # never: the header triggers the browser's Basic-auth popup
+        code, body, headers = self.call("/api/items?reviewer=maryam")
+        self.assertEqual((code, json.loads(body)["error"]), (401, "sign in required"))
+        self.assertIsNone(headers["WWW-Authenticate"])
         self.assertEqual(self.call("/api/items?reviewer=maryam", auth=basic("maryam", "bad"))[0], 401)
         self.assertEqual(self.call("/api/blind", {"reviewer": "x", "item_id": self.item["id"], "answer": 0})[0], 401)
 
@@ -126,7 +130,9 @@ class SignedInServerTest(unittest.TestCase):
         self.assertEqual(self.call("/api/users", {"action": "remove", "name": "maryam"}, auth=admin)[0], 400)  # Secret account
         self.assertEqual(self.call("/api/users", {"action": "add", "name": "ali rezaei"}, auth=admin)[0], 400)  # taken
         self.assertEqual(self.call("/api/users", {"action": "remove", "name": "ali-rezaei"}, auth=admin)[0], 200)
-        self.assertEqual(self.call("/api/whoami", auth=basic("ali-rezaei", temp))[0], 401)
+        gone = json.loads(self.call("/api/whoami", auth=basic("ali-rezaei", temp))[1])  # whoami itself is public
+        self.assertFalse(gone["signed_in"])
+        self.assertEqual(self.call("/api/items", auth=basic("ali-rezaei", temp))[0], 401)
         self.assertEqual(self.call("/api/password", {"new_password": "whatever-123"}, auth=admin)[0], 400)
 
     def test_json_required(self):

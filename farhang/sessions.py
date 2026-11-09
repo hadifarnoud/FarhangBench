@@ -82,7 +82,8 @@ class Sessions:
 
     def get(self, token):
         """The session this cookie belongs to (a copy of its record), or None. Seeing a session slides its
-        expiry forward, never past MAX_AGE from its creation."""
+        expiry forward, never past MAX_AGE from its creation; the record's ``renewed`` then holds the seconds
+        left on the new expiry (None otherwise), so the caller can re-send the cookie."""
         if not token:
             return None
         now = datetime.now(timezone.utc)
@@ -95,12 +96,14 @@ class Sessions:
                 del self._sessions[_hash(token)]
                 self._save()
                 return None
+            renewed = None
             slide = now - _parse(session["last_seen"]) > WRITE_AFTER
             session["last_seen"] = _iso(now)
             if slide:
                 session["expires"] = _iso(min(now + TTL, created + MAX_AGE))
                 self._save()
-            return dict(session)
+                renewed = max(1, int((_parse(session["expires"]) - now).total_seconds()))
+            return dict(session, renewed=renewed)
 
     def update_fingerprint(self, token, fingerprint):
         """Point ``token``'s session at its user's new password fingerprint (after an own password change)."""

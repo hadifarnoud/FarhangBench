@@ -30,6 +30,9 @@ from .validation import reviewer_slug
 
 ROLES = ("reviewer", "admin")
 MIN_PASSWORD = 10
+# A real-cost stand-in hash, so a failed sign-in for an unknown or disabled name takes as long as a real one
+# and timing can't reveal which names exist.
+_DUMMY_HASH = hash_password("dummy password")
 
 
 class AccountError(ValueError):
@@ -152,7 +155,8 @@ class Accounts:
     def verify_credentials(self, name, password):
         """The account info dict for a correct name+password pair, else None (same for every failure)."""
         found = self._lookup(reviewer_slug(name))
-        if found and verify_password(password, found[0]):
+        encoded = found[0] if found else _DUMMY_HASH
+        if verify_password(password, encoded) and found:
             return found[1]
         return None
 
@@ -172,14 +176,14 @@ class Accounts:
             return None
         name = reviewer_slug(name)
         found = self._lookup(name)
-        if not found:
-            return None
-        encoded, info = found
+        encoded = found[0] if found else _DUMMY_HASH  # unknown names get the dummy, keeping the timing even
         token = hashlib.sha256(authorization.encode("utf-8")).hexdigest()
         # PBKDF2 is slow on purpose; skip it for credentials already checked against the same stored hash.
-        if self._verified.get(token) == (name, encoded) or verify_password(password, encoded):
+        if found and self._verified.get(token) == (name, encoded):
+            return found[1]
+        if verify_password(password, encoded) and found:
             self._verified[token] = (name, encoded)
-            return info
+            return found[1]
         return None
 
     def record_login(self, name):
@@ -232,6 +236,12 @@ class Accounts:
             raise AccountError(f"role must be one of {', '.join(ROLES)}")
         if password is not None and len(password) < MIN_PASSWORD:
             raise AccountError(f"use at least {MIN_PASSWORD} characters")
+        if isinstance(must_change, bool) or must_change is None:
+            override = must_change
+        elif isinstance(must_change, str) and must_change in ("true", "false"):
+            override = must_change == "true"
+        else:
+            raise AccountError('must_change must be a boolean (false, true, "false" or "true")')
         with self._lock:
             users = self._read()
             if slug in users or slug in self._bootstrap_users():
@@ -239,7 +249,7 @@ class Accounts:
             chosen = password is not None
             password = password if chosen else secrets.token_urlsafe(9)
             users[slug] = {"hash": hash_password(password), "role": role,
-                           "must_change": bool(must_change) if (chosen and must_change is not None) else True,
+                           "must_change": override if (chosen and override is not None) else True,
                            "created": _now(), "created_by": by, "disabled": False,
                            "display_name": display_name or "", "last_login": None, "password_changed": None}
             self._write(users)

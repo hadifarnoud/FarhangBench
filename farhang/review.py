@@ -561,6 +561,8 @@ def make_handler(store, accounts=None, sessions=None, audit=None, secure_cookies
                         user = accounts.info(session["name"])
                         if user:
                             user["_token"] = token
+                            if session.get("renewed"):  # expiry slid forward; the cookie must follow
+                                self._renew_cookie = (token, session["renewed"])
                             return user
                         sessions.revoke(token)  # account gone or disabled; drop the cookie's session
             return self._basic_user()
@@ -579,17 +581,24 @@ def make_handler(store, accounts=None, sessions=None, audit=None, secure_cookies
                 self._json(401, {"error": "sign in required"})
             return user
 
-        def _cookie_headers(self, token=None):
+        def _cookie_value(self, token=None, max_age=SESSION_COOKIE_MAX_AGE):
             value = f"{SESSION_COOKIE}={token}" if token else f"{SESSION_COOKIE}=; Max-Age=0"
             parts = [value, "HttpOnly", "SameSite=Strict", "Path=/"]
             if token:
-                parts.append(f"Max-Age={SESSION_COOKIE_MAX_AGE}")
+                parts.append(f"Max-Age={max_age}")
             if secure_cookies or self.headers.get("X-Forwarded-Proto") == "https":
                 parts.append("Secure")
-            return [("Set-Cookie", "; ".join(parts))]
+            return "; ".join(parts)
+
+        def _cookie_headers(self, token=None):
+            return [("Set-Cookie", self._cookie_value(token))]
 
         def _send(self, code, body, ctype="application/json; charset=utf-8", extra=(), cache="no-store"):
             data = body if isinstance(body, bytes) else body.encode("utf-8")
+            # A sliding expiry the cookie hasn't heard about yet: re-send it with the remaining seconds.
+            renewed = getattr(self, "_renew_cookie", None)
+            if renewed and renewed[0]:
+                extra = [*extra, ("Set-Cookie", self._cookie_value(renewed[0], renewed[1]))]
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))

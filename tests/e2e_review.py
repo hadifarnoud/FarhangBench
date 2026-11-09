@@ -193,6 +193,19 @@ def http_phase(run, base, ctx):
         users = {u["name"]: u for u in admin.call("/api/admin/users")[1]}
         expect(users[REVIEWER]["must_change"] and users[REVIEWER]["display_name"] == REVIEWER_DISPLAY, users)
 
+    def lockout_scoped_to_name_and_ip():
+        for i in range(5):
+            status, _, _ = anon.call("/api/login", {"name": REVIEWER, "password": f"bad-{i}"},
+                                     headers={"X-Forwarded-For": "198.51.100.7"})
+            expect(status == 401, f"try {i}: {status}")
+        status, body, _ = anon.call("/api/login", {"name": REVIEWER, "password": "bad-6"},
+                                    headers={"X-Forwarded-For": "198.51.100.7"})
+        expect(status == 429, f"locked from the same IP: {status}")
+        status, body, _ = anon.call("/api/login", {"name": REVIEWER, "password": ctx["otp"]},
+                                    headers={"X-Forwarded-For": "198.51.100.8"})
+        expect(status == 200, f"the same name signs in from another IP: {status}")
+        return "lockout keyed on (name, ip), not the name alone — no account-wide lockout"
+
     def reviewer_must_change():
         status, body, _ = sara.call("/api/login", {"name": REVIEWER, "password": ctx["otp"]})
         expect(status == 200 and body["user"]["must_change"], f"{status} {body}")
@@ -308,6 +321,7 @@ def http_phase(run, base, ctx):
                      ("rate limit 429", rate_limit),                      ("admin sign-in sets a cookie", admin_login),
                      ("Basic auth is rate-limited and audited", basic_auth_rate_limited),
                      ("admin creates a reviewer (one-time password)", create_reviewer),
+                     ("lockout is scoped to name and IP", lockout_scoped_to_name_and_ip),
                      ("reviewer must choose a password", reviewer_must_change),
                      ("review flow: blind, key, verdict", review_flow), ("admin activity shows it", admin_activity),
                      ("reviewer stats", reviewer_stats),

@@ -101,22 +101,24 @@ class Peeks:
 
 
 class _LoginAttempts:
-    """In-memory rate limit for sign-in: 5 failed tries per name or 30 per IP in 15 minutes means wait.
-    The counters are pruned of expired entries on every call and capped at MAX_KEYS keys, so a spray of
-    arbitrary names or source IPs can't grow them without bound."""
+    """In-memory rate limit for sign-in: failures inside WINDOW mean wait, with three limits — 5 tries per
+    (name, IP) pair so an attacker can't lock an account out for everyone, 30 per IP, and a global cap of
+    100 per name so a distributed spray still hits a wall. The counters are pruned of expired entries on
+    every call and capped at MAX_KEYS keys, so arbitrary names and IPs can't grow them without bound."""
 
     WINDOW = 15 * 60
-    PER_NAME, PER_IP = 5, 30
+    PER_NAME_IP, PER_IP, PER_NAME = 5, 30, 100
     AUDIT_AFTER = 60  # at most one login_failed audit row per name per minute
     MAX_KEYS = 10_000
 
     def __init__(self):
         self._lock = threading.Lock()
-        self._by_name, self._by_ip, self._audited = defaultdict(list), defaultdict(list), {}
+        self._by_name_ip, self._by_ip, self._by_name = defaultdict(list), defaultdict(list), defaultdict(list)
+        self._audited = {}
 
     def _prune(self, now):
         """Drop expired hits in every counter dict, then whole keys past MAX_KEYS (least recent first)."""
-        for d in (self._by_name, self._by_ip):
+        for d in (self._by_name_ip, self._by_ip, self._by_name):
             for key in [k for k, hits in d.items() if not hits or now - hits[-1] >= self.WINDOW]:
                 d.pop(key, None)
             if len(d) > self.MAX_KEYS:
@@ -139,23 +141,26 @@ class _LoginAttempts:
         with self._lock:
             now = time.time()
             self._prune(now)
-            return max(self._remaining_wait(self._by_name[name], self.PER_NAME, now),
-                       self._remaining_wait(self._by_ip[ip], self.PER_IP, now))
+            return max(self._remaining_wait(self._by_name_ip[(name, ip)], self.PER_NAME_IP, now),
+                       self._remaining_wait(self._by_ip[ip], self.PER_IP, now),
+                       self._remaining_wait(self._by_name[name], self.PER_NAME, now))
 
     def failure(self, name, ip):
         """Note a failed try; True when a ``login_failed`` audit row should be written for it (throttled)."""
         with self._lock:
             now = time.time()
             self._prune(now)
-            self._by_name[name].append(now)
+            self._by_name_ip[(name, ip)].append(now)
             self._by_ip[ip].append(now)
+            self._by_name[name].append(now)
             if now - self._audited.get(name, 0) >= self.AUDIT_AFTER:
                 self._audited[name] = now
                 return True
             return False
 
-    def success(self, name):
+    def success(self, name, ip=""):
         with self._lock:
+            self._by_name_ip.pop((name, ip), None)
             self._by_name.pop(name, None)
             self._audited.pop(name, None)
 
@@ -534,7 +539,7 @@ def make_handler(store, accounts=None, sessions=None, audit=None, secure_cookies
                 if attempts.failure(name, self._client_ip()):
                     audit.record(name, "login_failed", name)
                 return None
-            attempts.success(name)
+            attempts.success(name, self._client_ip())
             return user
 
         def _resolve_user(self):
@@ -620,7 +625,7 @@ def make_handler(store, accounts=None, sessions=None, audit=None, secure_cookies
                 if attempts.failure(name, ip):
                     audit.record(name, "login_failed", name)
                 return self._json(401, {"error": "wrong name or password"})
-            attempts.success(name)
+            attempts.success(name, ip)
             accounts.record_login(name)
             audit.record(name, "login", name)
             token = sessions.create(name, ip, self.headers.get("User-Agent", ""))

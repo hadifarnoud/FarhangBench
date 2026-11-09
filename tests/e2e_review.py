@@ -23,6 +23,7 @@ Playwright isn't a dependency of the project. Install it once anywhere outside t
 """
 
 import argparse
+import base64
 import json
 import os
 import shutil
@@ -172,6 +173,18 @@ def http_phase(run, base, ctx):
         status, who, _ = admin.call("/api/whoami")
         expect(who["signed_in"] and who["reviewer"] == ADMIN, f"whoami: {who}")
 
+    def basic_auth_rate_limited():
+        bad = {"Authorization": "Basic " + base64.b64encode(b"basic-bot:wrong-pass").decode()}
+        for i in range(5):
+            status, body, headers = anon.call("/api/items", headers=bad)
+            expect(status == 401 and "WWW-Authenticate" not in headers, f"try {i}: {status}")
+        status, body, headers = anon.call("/api/items", headers=bad)
+        expect(status == 429 and body.get("retry_after", 0) > 0 and "WWW-Authenticate" not in headers,
+               f"6th try: {status} {body}")
+        log = admin.call("/api/admin/audit?action=login_failed&actor=basic-bot")[1]
+        expect(log["total"] >= 1, f"Basic failures audited: {log}")
+        return "5x 401 then 429 JSON for Basic auth, login_failed audited, no WWW-Authenticate"
+
     def create_reviewer():
         status, body, _ = admin.call("/api/admin/users", {"action": "add", "name": REVIEWER, "role": "reviewer",
                                                           "display_name": REVIEWER_DISPLAY})
@@ -292,7 +305,8 @@ def http_phase(run, base, ctx):
         expect(status == 403, "cross-origin POST refused")
 
     for name, fn in [("unauthenticated requests", unauthenticated), ("failed sign-in", failed_login),
-                     ("rate limit 429", rate_limit), ("admin sign-in sets a cookie", admin_login),
+                     ("rate limit 429", rate_limit),                      ("admin sign-in sets a cookie", admin_login),
+                     ("Basic auth is rate-limited and audited", basic_auth_rate_limited),
                      ("admin creates a reviewer (one-time password)", create_reviewer),
                      ("reviewer must choose a password", reviewer_must_change),
                      ("review flow: blind, key, verdict", review_flow), ("admin activity shows it", admin_activity),

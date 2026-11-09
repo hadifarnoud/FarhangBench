@@ -20,6 +20,7 @@ The default queue is native items (the ones the FarhangScore is built from); any
 reviewed too, as an audit.
 """
 
+import base64
 import io
 import json
 import mimetypes
@@ -134,6 +135,14 @@ class _LoginAttempts:
 
 _lock = threading.Lock()
 _BLIND_KEYS = ("id", "track", "task", "format", "lang", "context", "prompt", "options", "labels", "images")
+
+
+class _LoginBlocked(Exception):
+    """A sign-in try (form or Basic) that hit the rate limit; the handler answers 429."""
+
+    def __init__(self, wait):
+        super().__init__(wait)
+        self.wait = wait
 
 
 def source_of(item):
@@ -479,6 +488,28 @@ def make_handler(store, accounts=None, sessions=None, audit=None, secure_cookies
             forwarded = (self.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
             return forwarded or self.client_address[0]
 
+        def _basic_user(self):
+            """HTTP Basic credentials for scripts, through the same rate limiter and audit as /api/login.
+            Raises _LoginBlocked when too many tries failed; never sends WWW-Authenticate (popup trigger)."""
+            header = self.headers.get("Authorization")
+            if not header or not header.startswith("Basic "):
+                return None
+            name = ""
+            try:
+                name = reviewer_slug(base64.b64decode(header[6:]).decode("utf-8").split(":", 1)[0])
+            except (ValueError, UnicodeDecodeError):
+                pass
+            wait = attempts.allowed(name, self._client_ip())
+            if wait:
+                raise _LoginBlocked(wait)
+            user = accounts.authenticate(header)
+            if not user:
+                attempts.failure(name, self._client_ip())
+                audit.record(name, "login_failed", name)
+                return None
+            attempts.success(name)
+            return user
+
         def _resolve_user(self):
             """The signed-in account dict (+ the session token as ``_token``), or None."""
             if accounts is None:
@@ -492,11 +523,18 @@ def make_handler(store, accounts=None, sessions=None, audit=None, secure_cookies
                         user["_token"] = token
                         return user
                     sessions.revoke(token)  # account gone or disabled; drop the cookie's session
-            return accounts.authenticate(self.headers.get("Authorization"))
+            return self._basic_user()
+
+        def _rate_limited(self, wait):
+            return self._json(429, {"error": "too many failed tries; wait and try again", "retry_after": wait})
 
         def _user(self):
-            """The signed-in account, or None after sending a 401. Never sends WWW-Authenticate (popup trigger)."""
-            user = self._resolve_user()
+            """The signed-in account, or None after sending a 401 (or 429 when rate-limited)."""
+            try:
+                user = self._resolve_user()
+            except _LoginBlocked as exc:
+                self._rate_limited(exc.wait)
+                return None
             if user is None:
                 self._json(401, {"error": "sign in required"})
             return user
@@ -549,7 +587,7 @@ def make_handler(store, accounts=None, sessions=None, audit=None, secure_cookies
             ip = self._client_ip()
             wait = attempts.allowed(name, ip)
             if wait:
-                return self._json(429, {"error": "too many failed tries; wait and try again", "retry_after": wait})
+                return self._rate_limited(wait)
             user = accounts.verify_credentials(name, str(body.get("password", ""))) if name else None
             if not user:
                 attempts.failure(name, ip)
@@ -624,7 +662,10 @@ def make_handler(store, accounts=None, sessions=None, audit=None, secure_cookies
                 return self._send(200, "ok", "text/plain; charset=utf-8")
             qs = {k: v[0] for k, v in parse_qs(url.query).items()}
             if url.path == "/api/whoami":
-                return self._json(200, self._whoami(self._resolve_user()))
+                try:
+                    return self._json(200, self._whoami(self._resolve_user()))
+                except _LoginBlocked as exc:
+                    return self._rate_limited(exc.wait)
             if url.path == "/":  # the page itself is public; its data routes are not
                 return self._send(200, index_html(), "text/html; charset=utf-8")
             if url.path.startswith("/static/"):

@@ -160,9 +160,8 @@ class _LoginAttempts:
 
     def success(self, name, ip=""):
         with self._lock:
+            # The per-name count stays: a real user's login must not reset a password sprayer's count.
             self._by_name_ip.pop((name, ip), None)
-            self._by_name.pop(name, None)
-            self._audited.pop(name, None)
 
 _lock = threading.Lock()
 _BLIND_KEYS = ("id", "track", "task", "format", "lang", "context", "prompt", "options", "labels", "images")
@@ -372,8 +371,6 @@ def _activity_rows(store, viewer=""):
         elif reveal:
             row.update(verdict=rec.get("verdict"), flags=rec.get("flags", []), comment=rec.get("comment", ""),
                        suggested_answer=rec.get("suggested_answer", ""))
-        else:
-            row.update(verdict=rec.get("verdict"), flags=rec.get("flags", []))
         rows.append(row)
     rows.sort(key=lambda r: r["time"], reverse=True)
     return rows

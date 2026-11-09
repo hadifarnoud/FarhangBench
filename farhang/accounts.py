@@ -182,6 +182,8 @@ class Accounts:
         if found and self._verified.get(token) == (name, encoded):
             return found[1]
         if verify_password(password, encoded) and found:
+            if len(self._verified) > 1000:  # many distinct headers can decode to one valid login
+                self._verified.clear()
             self._verified[token] = (name, encoded)
             return found[1]
         return None

@@ -1092,6 +1092,7 @@ function activityFeed(rows, { showReviewer = true } = {}) {
       ${showReviewer ? reviewerLink(r.reviewer) : ""}
       ${r.type === "blind"
         ? html`<span class="chip ${r.correct === true ? "t-ok" : r.correct === false ? "t-bad" : "t-info"}">Blind answer ${r.correct === true ? "✓" : r.correct === false ? "✗" : ""}</span>`
+        : r.hidden ? html`<span class="chip t-info">Verdict</span>`
         : html`<span class="chip v-${r.verdict}">Verdict: ${VERDICT[r.verdict] || r.verdict}</span>`}
       <a href="#/admin/items/${enc(r.item_id)}" data-act="audit-open" data-id="${r.item_id}"><code>${r.item_id}</code></a>
       <span class="faint">${r.task || ""}</span>${r.current ? "" : html`<span class="chip outline" title="The item changed since">old version</span>`}

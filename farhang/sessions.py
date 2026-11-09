@@ -97,7 +97,7 @@ class Sessions:
                 self._save()
                 return None
             renewed = None
-            slide = now - _parse(session["last_seen"]) > WRITE_AFTER
+            slide = min(now + TTL, created + MAX_AGE) - _parse(session["expires"]) > WRITE_AFTER
             session["last_seen"] = _iso(now)
             if slide:
                 session["expires"] = _iso(min(now + TTL, created + MAX_AGE))

@@ -644,6 +644,10 @@ dialog.dialog::backdrop { background: rgba(15, 15, 14, .45); backdrop-filter: bl
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .toast { background: #f2f1ee; color: #1b1b1a; } }
 .toast .t-icon { width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; background: #3fae7a; color: #fff; flex: none; }
 .toast.error .t-icon { background: #e0574a; }
+.toast .t-close { flex: none; margin: -4px -8px -4px 2px; padding: 4px 8px; border: 0; background: none; color: inherit; opacity: .6; font-size: 16px; line-height: 1; cursor: pointer; }
+.toast .t-close:hover, .toast .t-close:focus-visible { opacity: 1; }
+.dot-sep { padding: 0 .45em; color: var(--text-3); }
+@media (max-width: 860px) { .dot-sep { display: none; } }
 .toast.leaving { opacity: 0; transform: translateY(6px); transition: opacity .2s, transform .2s; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } }
 

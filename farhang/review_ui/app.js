@@ -133,11 +133,13 @@ function toast(text, kind = "ok") {
   const box = $("#toasts");
   const el = document.createElement("div");
   el.className = "toast" + (kind === "error" ? " error" : "");
-  mount(el, html`<span class="t-icon" aria-hidden="true">${kind === "error" ? "!" : "✓"}</span><span>${text}</span>`);
+  mount(el, html`<span class="t-icon" aria-hidden="true">${kind === "error" ? "!" : "✓"}</span><span>${text}</span><button class="t-close" type="button" aria-label="Dismiss">×</button>`);
   box.append(el);
   try { if (box.matches(":popover-open")) box.hidePopover(); box.showPopover(); } catch (e) { /* no popover support: stays below dialogs */ }
+  const dismiss = () => { el.classList.add("leaving"); setTimeout(() => el.remove(), 220); };
+  const timer = setTimeout(dismiss, 4000);
+  $(".t-close", el).addEventListener("click", () => { clearTimeout(timer); dismiss(); });
   while (box.children.length > 3) box.firstChild.remove();
-  setTimeout(() => { el.classList.add("leaving"); setTimeout(() => el.remove(), 220); }, kind === "error" ? 5000 : 2600);
 }
 
 // ------------------------------------------------------------------ dialogs
@@ -599,10 +601,11 @@ function renderQueue() {
   const list = $("#queue-list"); if (!list) return;
   const rows = queue();
   const all = S.items || [];
-  const todoAll = all.filter(it => inScope(it, S.filters.scope) && isTodo(it)).length;
+  const todoAll = all.filter(it => inScope(it, S.filters.scope) && isTodo(it) && !it.answered).length;
+  const answeredAll = all.filter(it => inScope(it, S.filters.scope) && isTodo(it) && it.answered).length;
   const doneAll = all.filter(it => inScope(it, S.filters.scope) && it.my_verdict).length;
   mount($("#queue-meta"), html`<span><b>${n(rows.length)}</b> ${rows.length === 1 ? "item" : "items"}</span><span class="spacer"></span>
-    <span title="Reviewed by you in this source scope">${n(doneAll)} done · ${n(todoAll)} to do</span>`);
+    <span title="Reviewed by you in this source scope">${n(doneAll)} done · ${n(answeredAll)} answered · ${n(todoAll)} to do</span>`);
   const sel = S.cur && S.cur.id;
   const shown = rows.slice(0, S.limit);
   mount(list, html`${shown.map(it => html`<a role="listitem" class="qrow ${it.id === sel ? "sel" : ""}" href="#/review/${enc(it.id)}" data-id="${it.id}" ${it.id === sel ? html`aria-current="true"` : ""}>
@@ -697,7 +700,7 @@ function renderBlindPane() {
     answer = html`<div class="notice t-violet"><span class="notice-icon">!</span><div>You've seen this item's key in the admin audit view, so your answer wouldn't be blind. Leave this one to other reviewers.</div></div>`;
   } else {
     answer = html`<div class="answer-card">
-      <h2 class="label">Your answer <span class="fa">پاسخ شما</span> <span class="muted">· before you see the key</span></h2>
+      <h2 class="label">Your answer <span class="fa">پاسخ شما</span><span class="dot-sep" aria-hidden="true">·</span><span class="muted"> before you see the key</span></h2>
       ${opts ? html`<div class="options" role="radiogroup" aria-label="Options" dir="${it.lang === "en" ? "ltr" : "rtl"}">${opts.map((o, i) => html`<button type="button" class="option" role="radio" aria-checked="false" data-act="pick" data-i="${i}">
           <kbd>${i < 9 ? i + 1 : ""}</kbd><span class="opt-text" dir="auto">${o}</span></button>`)}</div>`
         : it.format === "generation" ? html`<textarea class="input answer-input" id="ans" dir="auto" aria-label="Your answer" placeholder="Optional: write your own answer. Generation items are scored by a rubric, so your verdict on the rubric is what counts."></textarea>`

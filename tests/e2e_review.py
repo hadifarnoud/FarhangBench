@@ -249,7 +249,9 @@ def http_phase(run, base, ctx):
         expect(status == 200 and body["total"] >= 2, f"{status} {body}")
         types = [r["type"] for r in body["rows"]]
         expect(types[0] == "verdict" and "blind" in types, f"newest first: {types}")
-        expect(body["rows"][0]["comment"] and body["rows"][0]["current"], body["rows"][0])
+        # The admin hasn't answered or peeked the item yet, so sara's comment and answers stay hidden.
+        expect(body["rows"][0]["current"] and body["rows"][0]["hidden"] and "comment" not in body["rows"][0],
+               body["rows"][0])
         status, body, _ = sara.call("/api/admin/activity")
         expect(status == 403, "reviewers can't see the admin feed")
 

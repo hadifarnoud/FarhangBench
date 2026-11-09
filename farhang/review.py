@@ -363,8 +363,10 @@ def _reviewer_rows(store, accounts):
     return rows
 
 
-def _item_rows(store):
-    """One admin row per item: status summary plus review counts (see /api/admin/items)."""
+def _item_rows(store, viewer=""):
+    """One admin row per item: status summary plus review counts (see /api/admin/items). ``my_answered`` and
+    ``peeked`` say whether ``viewer`` (the admin asking) already answered blind or saw the key, so the page knows
+    when opening the audit view needs a warning first."""
     items = store.items()
     records = load_records(store.reviews_dir)
     merged = merge_reviews(records)
@@ -381,7 +383,9 @@ def _item_rows(store):
                      "prompt": it["prompt"][:140], "status": st["status"], "verdicts": st["verdicts"],
                      "agree": st["agree"], "flags": st["flags"], "reviewers": st["reviewers"],
                      "comments_count": sum(1 for r in reviews.values() if r.get("comment")),
-                     "last_activity": last_activity.get(it["id"])})
+                     "last_activity": last_activity.get(it["id"]),
+                     "my_answered": "blind_answer" in reviews.get(viewer, {}),
+                     "peeked": bool(viewer) and store._peeked(viewer, it["id"], content_hash(it))})
     rows.sort(key=lambda r: r["last_activity"] or "", reverse=True)  # stable; disputed stays on top below
     rows.sort(key=lambda r: r["status"] != "disputed")
     return rows
@@ -582,7 +586,7 @@ def make_handler(store, accounts=None, sessions=None, audit=None, secure_cookies
                 recent = [r for r in _activity_rows(store) if r["reviewer"] == name][:200]
                 return self._json(200, dict(row, recent=recent))
             if url.path == "/api/admin/items":
-                rows = _item_rows(store)
+                rows = _item_rows(store, user.get("name") or reviewer_slug(qs.get("reviewer", "")))
                 q = qs.get("q", "").lower()
                 rows = [r for r in rows
                         if (not qs.get("status") or r["status"] == qs["status"])

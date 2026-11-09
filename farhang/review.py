@@ -176,6 +176,8 @@ class ReviewStore:
             st = item_status(it, reviews)
             out.append(dict(blind_view(it), status=st["status"], verdicts=st["verdicts"], gated=source_of(it) in gated,
                             answered="blind_answer" in mine, my_verdict=mine.get("verdict"),
+                            my_flags=mine.get("flags", []),
+                            my_time=max(mine.get("blind_time", ""), mine.get("verdict_time", "")) or None,
                             peeked=self._peeked(reviewer, it["id"], content_hash(it)),
                             own_source=own_source))
         order = {t: i for i, t in enumerate(TASKS)}
@@ -376,6 +378,27 @@ def _item_rows(store):
     rows.sort(key=lambda r: r["last_activity"] or "", reverse=True)  # stable; disputed stays on top below
     rows.sort(key=lambda r: r["status"] != "disputed")
     return rows
+
+
+def _me_stats(store, accounts, reviewer):
+    """One reviewer's own numbers plus their remaining queue per scope (see /api/me/stats)."""
+    row = next((r for r in _reviewer_rows(store, accounts) if r["name"] == reviewer), None)
+    if row is None:  # a name with no reviews and no account yet (local mode)
+        days = [date.today() - timedelta(days=d) for d in range(13, -1, -1)]
+        row = {"name": reviewer, "blind_answers": 0, "verdicts": 0, "blind_accuracy": None, "agreement": None,
+               "per_day": [{"date": d.isoformat(), "n": 0} for d in days]}
+    queue = {"native": 0, "gated": 0, "reference": 0}
+    for it in store.listing(reviewer):
+        if it["my_verdict"] or it["status"] in ("retired", "outdated"):
+            continue
+        if it["source"] == NATIVE_SOURCE:
+            queue["native"] += 1
+        elif it["gated"]:
+            queue["gated"] += 1
+        else:
+            queue["reference"] += 1
+    return {key: row[key] for key in ("name", "blind_answers", "verdicts", "blind_accuracy", "agreement",
+                                      "per_day")} | {"queue": queue}
 
 
 def _item_detail(store, item_id, peeker, audit):
@@ -604,7 +627,13 @@ def make_handler(store, accounts=None, sessions=None, audit=None, secure_cookies
                 except ValueError:
                     limit, offset = 50, 0
                 return self._admin(url, qs, user, limit, offset)
+            if url.path == "/api/me/stats":
+                if not reviewer:
+                    return self._json(400, {"error": "reviewer name required"})
+                return self._json(200, _me_stats(store, accounts, reviewer))
             if url.path == "/api/export":
+                if not self._admin_ok(user):
+                    return self._json(403, {"error": "admins only"})
                 data = export_zip(store.reviews_dir)
                 return self._send(200, data, "application/zip",
                                   extra=[("Content-Disposition", 'attachment; filename="farhangbench-reviews.zip"')])

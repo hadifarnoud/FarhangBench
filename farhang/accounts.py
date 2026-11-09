@@ -140,6 +140,15 @@ class Accounts:
         found = self._lookup(name)
         return found[1] if found else None
 
+    def password_fingerprint(self, name):
+        """A short digest of the account's stored password hash, or None if there's no enabled account. A
+        session keeps the fingerprint from sign-in; when this changes (new password, Secret edited) the
+        session no longer proves identity."""
+        found = self._lookup(name)
+        if not found:
+            return None
+        return hashlib.sha256(found[0].encode("utf-8")).hexdigest()[:16]
+
     def verify_credentials(self, name, password):
         """The account info dict for a correct name+password pair, else None (same for every failure)."""
         found = self._lookup(reviewer_slug(name))

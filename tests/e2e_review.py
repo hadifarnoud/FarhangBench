@@ -313,6 +313,18 @@ def http_phase(run, base, ctx):
         status, who, _ = admin.call("/api/whoami")
         expect(not who["signed_in"], who)
 
+    def own_password_change():
+        other = Client(base)
+        expect(other.call("/api/login", {"name": REVIEWER, "password": REVIEWER_PW})[0] == 200, "second session")
+        status, body, _ = sara.call("/api/password", {"current_password": REVIEWER_PW,
+                                                      "new_password": "sara-another-pass-88"})
+        expect(status == 200, f"{status} {body}")
+        expect(sara.call("/api/whoami")[1]["signed_in"], "the session that changed the password stays valid")
+        expect(not other.call("/api/whoami")[1]["signed_in"], "other sessions end on a password change")
+        expect(anon.call("/api/login", {"name": REVIEWER, "password": "sara-another-pass-88"})[0] == 200,
+               "signs in with the new password")
+        return "current session fingerprint refreshed; the other session's stale fingerprint was rejected"
+
     def csrf():
         status, _, _ = sara.call("/api/verdict", {"item_id": "x"}, headers={"Origin": "http://evil.example"})
         expect(status == 403, "cross-origin POST refused")
@@ -328,6 +340,7 @@ def http_phase(run, base, ctx):
                      ("activity feed hides answers until a peek", activity_hides_answers_until_peek),
                      ("admin item audit records a peek", admin_peek),
                      ("disabling a reviewer ends their session", disable_kills_session),
+                     ("own password change keeps its session", own_password_change),
                      ("cross-origin POST refused", csrf), ("sign out", logout)]:
         if not run.step(P, name, fn):
             return False

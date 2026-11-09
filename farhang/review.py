@@ -548,13 +548,17 @@ def make_handler(store, accounts=None, sessions=None, audit=None, secure_cookies
                 return {}
             token = self._session_token()
             if token:
-                name = sessions.get(token)
-                if name:
-                    user = accounts.info(name)
-                    if user:
-                        user["_token"] = token
-                        return user
-                    sessions.revoke(token)  # account gone or disabled; drop the cookie's session
+                session = sessions.get(token)
+                if session:
+                    # The cookie proves identity only while the password hash it was made against still stands.
+                    if session.get("fingerprint") != accounts.password_fingerprint(session["name"]):
+                        sessions.revoke(token)
+                    else:
+                        user = accounts.info(session["name"])
+                        if user:
+                            user["_token"] = token
+                            return user
+                        sessions.revoke(token)  # account gone or disabled; drop the cookie's session
             return self._basic_user()
 
         def _rate_limited(self, wait):
@@ -628,16 +632,17 @@ def make_handler(store, accounts=None, sessions=None, audit=None, secure_cookies
             attempts.success(name, ip)
             accounts.record_login(name)
             audit.record(name, "login", name)
-            token = sessions.create(name, ip, self.headers.get("User-Agent", ""))
+            token = sessions.create(name, ip, self.headers.get("User-Agent", ""),
+                                    fingerprint=accounts.password_fingerprint(name))
             return self._json(200, {"ok": True, "user": self._whoami(user)}, extra=self._cookie_headers(token))
 
         def _logout(self):
             token = self._session_token()
             if token:
-                name = sessions.get(token)
+                session = sessions.get(token)
                 sessions.revoke(token)
-                if name:
-                    audit.record(name, "logout", name)
+                if session:
+                    audit.record(session["name"], "logout", session["name"])
             self._json(200, {"ok": True}, extra=self._cookie_headers(None))
 
         # ---------------------------------------------------------- routes
@@ -777,6 +782,7 @@ def make_handler(store, accounts=None, sessions=None, audit=None, secure_cookies
                     if not user.get("must_change") and not accounts.check_password(user["name"], current):
                         raise AccountError("the current password is wrong")
                     accounts.change_password(user["name"], str(body.get("new_password", "")))
+                    sessions.update_fingerprint(user.get("_token"), accounts.password_fingerprint(user["name"]))
                     sessions.revoke_user(user["name"], except_token=user.get("_token"))
                     audit.record(user["name"], "password_change", user["name"])
                     return self._json(200, {"ok": True})

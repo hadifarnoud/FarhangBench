@@ -313,6 +313,16 @@ def http_phase(run, base, ctx):
         status, who, _ = admin.call("/api/whoami")
         expect(not who["signed_in"], who)
 
+    def progress_comments_admin_only():
+        admin_body = admin.call("/api/progress")[1]
+        expect(admin_body["problems"] and all("comments" in p for p in admin_body["problems"]),
+               "admins get the comments on open problems")
+        sara_body = sara.call("/api/progress")[1]
+        expect(sara_body["problems"] and all("comments" not in p for p in sara_body["problems"]),
+               "reviewers get no comments key, so colleagues' comments stay private")
+        expect(len(admin_body["problems"]) == len(sara_body["problems"]), "same problems, just without comments")
+        return f"{len(admin_body['problems'])} open problems; comments only in the admin response"
+
     def own_password_change():
         other = Client(base)
         expect(other.call("/api/login", {"name": REVIEWER, "password": REVIEWER_PW})[0] == 200, "second session")
@@ -340,6 +350,7 @@ def http_phase(run, base, ctx):
                      ("activity feed hides answers until a peek", activity_hides_answers_until_peek),
                      ("admin item audit records a peek", admin_peek),
                      ("disabling a reviewer ends their session", disable_kills_session),
+                     ("progress comments are admin-only", progress_comments_admin_only),
                      ("own password change keeps its session", own_password_change),
                      ("cross-origin POST refused", csrf), ("sign out", logout)]:
         if not run.step(P, name, fn):

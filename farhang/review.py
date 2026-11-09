@@ -275,8 +275,10 @@ class ReviewStore:
                                              "suggested_answer": suggested_answer.strip()})
         return self.reveal(reviewer, item_id)
 
-    def progress(self):
-        """Status counts by track and task for native items, by source for the rest, plus open problems."""
+    def progress(self, admin=False):
+        """Status counts by track and task for native items, by source for the rest, plus open problems.
+        Reviewer ``comments`` (with comments and suggested answers) only go to admins — other reviewers
+        would see colleagues' work on items they may not have answered blind yet."""
         items, merged = self.items(), self.merged()
         rows = defaultdict(Counter)
         accuracy = defaultdict(list)
@@ -295,12 +297,14 @@ class ReviewStore:
                 if r.get("blind_correct") is not None:
                     accuracy[group].append(r["blind_correct"])
             if st["status"] == "disputed" or (st["flags"] and st["status"] not in ("retired", "outdated")):
-                problems.append({"id": it["id"], "task": it["task"], "source": source_of(it), "status": st["status"],
-                                 "flags": st["flags"], "prompt": it["prompt"][:160],
-                                 "comments": [{"reviewer": r["reviewer"], "verdict": r.get("verdict"),
-                                               "comment": r.get("comment", ""),
-                                               "suggested_answer": r.get("suggested_answer", "")}
-                                              for r in reviews.values() if r.get("verdict")]})
+                problem = {"id": it["id"], "task": it["task"], "source": source_of(it), "status": st["status"],
+                           "flags": st["flags"], "prompt": it["prompt"][:160]}
+                if admin:
+                    problem["comments"] = [{"reviewer": r["reviewer"], "verdict": r.get("verdict"),
+                                            "comment": r.get("comment", ""),
+                                            "suggested_answer": r.get("suggested_answer", "")}
+                                           for r in reviews.values() if r.get("verdict")]
+                problems.append(problem)
         gated = review_required_sources()
         table = [{"group": g, **dict(c), "review_required": g.removeprefix("source:") in gated, "human_accuracy": (sum(accuracy[g]) / len(accuracy[g])) if accuracy[g] else None,
                   "blind_answers": len(accuracy[g])} for g, c in rows.items()]
@@ -312,7 +316,7 @@ class ReviewStore:
 
 def summary_lines(store):
     """Plain-text progress, for ``python -m farhang review --summary``."""
-    p = store.progress()
+    p = store.progress(admin=True)
     cols = ("items", "unreviewed", "in_review", "validated", "disputed", "outdated")
     lines = [f"{'group':40s}" + "".join(f"{c:>12s}" for c in cols) + f"{'human acc.':>12s}"]
     for r in p["rows"]:
@@ -747,7 +751,7 @@ def make_handler(store, accounts=None, sessions=None, audit=None, secure_cookies
                 key = store.reveal(reviewer, qs.get("id", ""))
                 return self._json(200, key) if key else self._json(403, {"error": "answer the item blind first"})
             if url.path == "/api/progress":
-                return self._json(200, store.progress())
+                return self._json(200, store.progress(admin=self._admin_ok(user)))
             if url.path.startswith("/data/images/"):
                 file = (ROOT / url.path.lstrip("/")).resolve()
                 if (ROOT / "data" / "images").resolve() in file.parents and file.is_file():

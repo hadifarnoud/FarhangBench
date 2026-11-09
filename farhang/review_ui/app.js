@@ -1036,7 +1036,7 @@ async function viewProgress(view, stale) {
         <div class="when"><span class="chip st-${x.status}">${STATUS[x.status]}</span></div>
         <div class="what"><div class="line1"><code>${x.id}</code><span class="faint">${x.task}</span>${x.flags.map(f => html`<span class="chip flag">${META.flags[f] || f}</span>`)}</div>
           <div class="prompt clamp2" dir="auto">${x.prompt}</div>
-          ${x.comments.filter(c => c.comment || c.suggested_answer || c.verdict === "wrong").map(c => html`<div class="comment"><b>${c.reviewer}</b> · ${VERDICT[c.verdict] || c.verdict}${c.suggested_answer ? html` — suggests <span class="fa" dir="auto">${c.suggested_answer}</span>` : ""}${c.comment ? html`<div class="fa" dir="auto">${c.comment}</div>` : ""}</div>`)}</div></li>`)}</ul>
+          ${(x.comments || []).filter(c => c.comment || c.suggested_answer || c.verdict === "wrong").map(c => html`<div class="comment"><b>${c.reviewer}</b> · ${VERDICT[c.verdict] || c.verdict}${c.suggested_answer ? html` — suggests <span class="fa" dir="auto">${c.suggested_answer}</span>` : ""}${c.comment ? html`<div class="fa" dir="auto">${c.comment}</div>` : ""}</div>`)}</div></li>`)}</ul>
         ${p.problems.length > 100 ? html`<div class="pager">Showing 100 of ${n(p.problems.length)}.${isAdmin() ? html` <a href="#/admin/items?status=disputed">See all in Items</a>` : ""}</div>` : ""}`
       : html`<div class="empty"><b>No open problems</b><p>Nothing is disputed or flagged.</p></div>`}</div>
     <p class="faint section-gap">Editing an item in <code>farhang browse</code> resets its reviews, because reviewers judged the old version.</p>

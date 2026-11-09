@@ -302,22 +302,34 @@ def _hashes(items):
     return {i["id"]: content_hash(i) for i in items.values()}
 
 
-def _activity_rows(store):
-    """Every review record, newest first, with item context and whether it's about the item's current version."""
+def _activity_rows(store, viewer=""):
+    """Every review record, newest first, with item context and whether it's about the item's current version.
+    Rows about the item's CURRENT version hide other reviewers' blind ``answer``/``correct`` and their
+    ``comment``/``suggested_answer`` (``hidden``) when ``viewer`` has not answered that version blind and has not
+    peeked at it — otherwise the audit feed would hand out the keys without ever recording a peek."""
     items = store.items()
     hashes = _hashes(items)
+    merged = store.merged()
     rows = []
     for rec in reversed(load_records(store.reviews_dir)):  # later records first, breaking equal-second ties
         it = items.get(rec["item_id"])
+        current = rec.get("item_hash") == hashes.get(rec["item_id"])
         row = {"time": rec.get("time", ""), "type": rec["type"], "reviewer": rec["reviewer"],
                "item_id": rec["item_id"], "task": it["task"] if it else None,
                "source": source_of(it) if it else None, "prompt": it["prompt"][:140] if it else "",
-               "current": rec.get("item_hash") == hashes.get(rec["item_id"])}
+               "current": current}
+        reveal = not current or "blind_answer" in merged.get((rec["item_id"], rec["item_hash"]), {}).get(viewer, {}) \
+            or (viewer and store._peeked(viewer, rec["item_id"], rec["item_hash"]))
+        if not reveal:
+            row["hidden"] = True
         if rec["type"] == "blind":
-            row.update(answer=rec.get("answer"), correct=rec.get("correct"))
-        else:
+            if reveal:
+                row.update(answer=rec.get("answer"), correct=rec.get("correct"))
+        elif reveal:
             row.update(verdict=rec.get("verdict"), flags=rec.get("flags", []), comment=rec.get("comment", ""),
                        suggested_answer=rec.get("suggested_answer", ""))
+        else:
+            row.update(verdict=rec.get("verdict"), flags=rec.get("flags", []))
         rows.append(row)
     rows.sort(key=lambda r: r["time"], reverse=True)
     return rows
@@ -562,11 +574,12 @@ def make_handler(store, accounts=None, sessions=None, audit=None, secure_cookies
 
         def _admin(self, url, qs, user, limit, offset):
             """The admin-only oversight routes (checked by the caller)."""
+            viewer = user.get("name") or reviewer_slug(qs.get("reviewer", ""))
             if url.path == "/api/admin/audit":
                 return self._json(200, audit.query(limit=limit, offset=offset,
                                                    actor=qs.get("actor") or None, action=qs.get("action") or None))
             if url.path == "/api/admin/activity":
-                rows = _activity_rows(store)
+                rows = _activity_rows(store, viewer)
                 rows = [r for r in rows
                         if (not qs.get("reviewer") or r["reviewer"] == qs["reviewer"])
                         and (not qs.get("type") or r["type"] == qs["type"])
@@ -583,7 +596,7 @@ def make_handler(store, accounts=None, sessions=None, audit=None, secure_cookies
                 row = next((r for r in _reviewer_rows(store, accounts) if r["name"] == name), None)
                 if row is None:
                     return self._json(404, {"error": "no such reviewer"})
-                recent = [r for r in _activity_rows(store) if r["reviewer"] == name][:200]
+                recent = [r for r in _activity_rows(store, viewer) if r["reviewer"] == name][:200]
                 return self._json(200, dict(row, recent=recent))
             if url.path == "/api/admin/items":
                 rows = _item_rows(store, user.get("name") or reviewer_slug(qs.get("reviewer", "")))

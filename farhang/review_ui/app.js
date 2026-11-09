@@ -1093,6 +1093,7 @@ function activityFeed(rows, { showReviewer = true } = {}) {
       <a href="#/admin/items/${enc(r.item_id)}" data-act="audit-open" data-id="${r.item_id}"><code>${r.item_id}</code></a>
       <span class="faint">${r.task || ""}</span>${r.current ? "" : html`<span class="chip outline" title="The item changed since">old version</span>`}
       ${(r.flags || []).map(f => html`<span class="chip flag">${META.flags[f] || f}</span>`)}</div>
+      ${r.hidden ? html`<div class="cell-sub faint">hidden — <a href="#/admin/items/${enc(r.item_id)}">open the item to see answers</a></div>` : ""}
       ${r.prompt ? html`<div class="prompt clamp1" dir="auto">${r.prompt}</div>` : ""}
       ${r.type === "blind" && r.answer !== null && r.answer !== undefined && r.answer !== "" ? html`<div class="cell-sub">Answered <span class="fa" dir="auto">${typeof r.answer === "number" ? `option ${r.answer + 1}` : r.answer}</span></div>` : ""}
       ${r.type === "blind" && (r.answer === null || r.answer === "") ? html`<div class="cell-sub">Answered “I don't know”</div>` : ""}

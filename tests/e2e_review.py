@@ -235,6 +235,22 @@ def http_phase(run, base, ctx):
         expect(status == 200 and row["verdict_counts"]["wrong"] == 2 and row["recent"], row)
         expect(row["display_name"] == REVIEWER_DISPLAY, row)
 
+    def activity_hides_answers_until_peek():
+        item = ctx["reviewed_item"]
+        rows = [r for r in admin.call(f"/api/admin/activity?item={item}")[1]["rows"]
+                if r["item_id"] == item and r["current"]]
+        expect(rows and all(r.get("hidden") for r in rows), f"current rows hidden for the admin: {rows}")
+        expect(not any(k in r for r in rows for k in ("answer", "correct", "comment", "suggested_answer")), rows)
+        rrow = admin.call(f"/api/admin/reviewers/{REVIEWER}")[1]
+        expect(all(r.get("hidden") for r in rrow["recent"] if r["item_id"] == item and r["current"]),
+               "the reviewer page hides them too")
+        expect(admin.call(f"/api/admin/items/{item}")[0] == 200, "open the audit view (recorded peek)")
+        rows = [r for r in admin.call(f"/api/admin/activity?item={item}")[1]["rows"]
+                if r["item_id"] == item and r["current"]]
+        expect(rows and all(not r.get("hidden") for r in rows) and any("answer" in r for r in rows),
+               f"visible after the peek: {rows}")
+        return f"other reviewers' answers hidden on {item} until the recorded peek"
+
     def admin_peek():
         item = ctx["peek_item"]
         rows = admin.call(f"/api/admin/items?q={item}")[1]["rows"]
@@ -280,7 +296,9 @@ def http_phase(run, base, ctx):
                      ("admin creates a reviewer (one-time password)", create_reviewer),
                      ("reviewer must choose a password", reviewer_must_change),
                      ("review flow: blind, key, verdict", review_flow), ("admin activity shows it", admin_activity),
-                     ("reviewer stats", reviewer_stats), ("admin item audit records a peek", admin_peek),
+                     ("reviewer stats", reviewer_stats),
+                     ("activity feed hides answers until a peek", activity_hides_answers_until_peek),
+                     ("admin item audit records a peek", admin_peek),
                      ("disabling a reviewer ends their session", disable_kills_session),
                      ("cross-origin POST refused", csrf), ("sign out", logout)]:
         if not run.step(P, name, fn):

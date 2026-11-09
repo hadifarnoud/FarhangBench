@@ -3,41 +3,17 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FarhangBench Review</title>
+<meta name="color-scheme" content="light dark">
+<title>FarhangBench review · بازبینی</title>
 <link rel="stylesheet" href="/static/app.css">
 <script type="application/json" id="meta">__META__</script>
 <script src="/static/app.js" defer></script>
 </head>
 <body>
-<header>
-  <h1>FarhangBench review <span>· بازبینی</span></h1>
-  <div class="tabs"><button id="t-review" class="on">Review</button><button id="t-progress">Progress</button><button id="t-people" class="hidden">People</button></div>
-  <label class="controls" id="who-row">Your name <input id="who" placeholder="e.g. maryam" size="14" autocomplete="name"></label>
-  <button id="pw-btn" class="hidden" title="Change your password">Password</button>
-  <button id="signout-btn" class="hidden" title="Sign out">Sign out</button>
-  <div class="controls" id="filters">
-    <select id="f-scope">
-      <option value="native">Native items (FarhangScore)</option>
-      <option value="gated">Social norms: scored only after review</option>
-      <option value="reference">Imported and derived (audit)</option>
-      <option value="all">All items</option>
-    </select>
-    <select id="f-track"><option value="">All tracks</option></select>
-    <select id="f-task"><option value="">All tasks</option></select>
-    <select id="f-show">
-      <option value="todo">Not reviewed by me</option>
-      <option value="mine">Reviewed by me</option>
-      <option value="disputed">Disputed</option>
-      <option value="all">Everything</option>
-    </select>
-    <span id="count" class="muted"></span>
-  </div>
-</header>
-<div class="layout" id="review-view">
-  <div id="list"></div>
-  <div id="main"></div>
-</div>
-<div id="progress-view" class="hidden"></div>
-<div id="people-view" class="hidden"></div>
+<button type="button" class="skip-link" id="skip-link">Skip to content</button>
+<header class="topbar" id="topbar" hidden></header>
+<main id="view" tabindex="-1"><div class="boot" aria-busy="true"><span class="spinner" aria-hidden="true"></span><span>Loading…</span></div></main>
+<div class="toasts" id="toasts" role="status" aria-live="polite" popover="manual"></div>
+<noscript><p class="noscript">This page needs JavaScript.</p></noscript>
 </body>
 </html>

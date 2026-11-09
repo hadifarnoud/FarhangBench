@@ -21,9 +21,10 @@ import time
 import webbrowser
 import zipfile
 from collections import Counter, defaultdict
+from datetime import date, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from .data import ROOT, load_items
 from .runner import gold_summary
@@ -50,6 +51,45 @@ def index_html():
     meta = json.dumps({"tracks": {k: v[2] for k, v in TRACKS.items()}, "tasks": TASKS, "flags": FLAGS},
                       ensure_ascii=False)
     return (UI_DIR / "index.html").read_text(encoding="utf-8").replace("__META__", meta)
+
+
+class Peeks:
+    """Admins who looked at an item's key in the audit view, as ``{name: [item_id@hash, ...]}``: seeing a key
+    there means that reviewer's answer to that version of the item can no longer count as blind. In memory when
+    there's no state directory (local mode)."""
+
+    def __init__(self, path=None):
+        self.path = Path(path) if path else None
+        self._lock = threading.Lock()
+        self._peeks = {}
+        if self.path and self.path.is_file():
+            try:
+                self._peeks = json.loads(self.path.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                self._peeks = {}
+
+    def _save(self):
+        if not self.path:
+            return
+        import os
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self._peeks, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, self.path)
+
+    def has(self, name, key):
+        with self._lock:
+            return key in self._peeks.get(name, ())
+
+    def add(self, name, key):
+        """Record the peek; returns False if it was already recorded."""
+        with self._lock:
+            seen = self._peeks.setdefault(name, [])
+            if key in seen:
+                return False
+            seen.append(key)
+            self._save()
+            return True
 
 
 class _LoginAttempts:
@@ -108,16 +148,21 @@ def key_view(item):
 
 
 class ReviewStore:
-    """Items plus reviews, re-read on every call so edits made in ``farhang browse`` show up straight away."""
+    """Items plus reviews, re-read on every call so edits made in ``farhang browse`` show up straight away.
+    ``peeks`` holds the admins who saw an item's key in the audit view (see ``Peeks``), whose blind answers can no
+    longer count for those versions."""
 
-    def __init__(self, data_dir, reviews_dir=REVIEWS_DIR):
-        self.data_dir, self.reviews_dir = Path(data_dir), Path(reviews_dir)
+    def __init__(self, data_dir, reviews_dir=REVIEWS_DIR, peeks=None):
+        self.data_dir, self.reviews_dir, self.peeks = Path(data_dir), Path(reviews_dir), peeks
 
     def items(self):
         return {i["id"]: i for i in load_items(self.data_dir)}
 
     def merged(self):
         return merge_reviews(load_records(self.reviews_dir))
+
+    def _peeked(self, reviewer, item_id, item_hash):
+        return bool(self.peeks) and self.peeks.has(reviewer, f"{item_id}@{item_hash}")
 
     def listing(self, reviewer):
         items, merged, gated = self.items(), self.merged(), review_required_sources()
@@ -131,6 +176,7 @@ class ReviewStore:
             st = item_status(it, reviews)
             out.append(dict(blind_view(it), status=st["status"], verdicts=st["verdicts"], gated=source_of(it) in gated,
                             answered="blind_answer" in mine, my_verdict=mine.get("verdict"),
+                            peeked=self._peeked(reviewer, it["id"], content_hash(it)),
                             own_source=own_source))
         order = {t: i for i, t in enumerate(TASKS)}
         out.sort(key=lambda it: (it["source"] != NATIVE_SOURCE, order.get(it["task"], len(order)), it["id"]))
@@ -154,6 +200,9 @@ class ReviewStore:
             h = content_hash(item)
             mine = self.merged().get((item_id, h), {}).get(reviewer, {})
             if "blind_answer" not in mine:  # the first blind answer stands
+                if self._peeked(reviewer, item_id, h):
+                    raise PermissionError("you have seen this item's key in the admin view, "
+                                          "so your blind answer would not be blind")
                 if item["format"] == "mcq" and answer is not None:
                     answer = int(answer)
                 append_record(self.reviews_dir, {"type": "blind", "reviewer": reviewer, "item_id": item_id,
@@ -235,6 +284,125 @@ def export_zip(reviews_dir):
     return buf.getvalue()
 
 
+# ------------------------------------------------------------ admin oversight
+# What the admin views show: every review record alongside the items, so an admin can check both what reviewers
+# did and the current state of an item, without touching the review files.
+
+
+def _hashes(items):
+    return {i["id"]: content_hash(i) for i in items.values()}
+
+
+def _activity_rows(store):
+    """Every review record, newest first, with item context and whether it's about the item's current version."""
+    items = store.items()
+    hashes = _hashes(items)
+    rows = []
+    for rec in reversed(load_records(store.reviews_dir)):  # later records first, breaking equal-second ties
+        it = items.get(rec["item_id"])
+        row = {"time": rec.get("time", ""), "type": rec["type"], "reviewer": rec["reviewer"],
+               "item_id": rec["item_id"], "task": it["task"] if it else None,
+               "source": source_of(it) if it else None, "prompt": it["prompt"][:140] if it else "",
+               "current": rec.get("item_hash") == hashes.get(rec["item_id"])}
+        if rec["type"] == "blind":
+            row.update(answer=rec.get("answer"), correct=rec.get("correct"))
+        else:
+            row.update(verdict=rec.get("verdict"), flags=rec.get("flags", []), comment=rec.get("comment", ""),
+                       suggested_answer=rec.get("suggested_answer", ""))
+        rows.append(row)
+    rows.sort(key=lambda r: r["time"], reverse=True)
+    return rows
+
+
+def _reviewer_rows(store, accounts):
+    """Per-reviewer work summary for everyone with an account or a review record (see /api/admin/reviewers)."""
+    records = load_records(store.reviews_dir)
+    items = store.items()
+    hashes, merged = _hashes(items), merge_reviews(records)
+    acct = {u["name"]: u for u in accounts.list()} if accounts else {}
+    rows = []
+    for name in sorted(set(acct) | {r["reviewer"] for r in records}):
+        recs = [r for r in records if r["reviewer"] == name]
+        blinds = [r for r in recs if r["type"] == "blind"]
+        scored = [r["correct"] for r in blinds if r.get("correct") is not None]
+        counts = {"correct": 0, "wrong": 0, "unsure": 0}
+        flags_raised, agreement_num, agreement_den = 0, 0, 0
+        per_day = Counter(r.get("time", "")[:10] for r in recs)
+        for (item_id, item_hash), reviews in merged.items():
+            if hashes.get(item_id) != item_hash or name not in reviews:
+                continue
+            verdict = reviews[name].get("verdict")
+            if not verdict:
+                continue
+            counts[verdict] += 1
+            flags_raised += len(reviews[name].get("flags", []))
+            others = [review["verdict"] for other, review in reviews.items()
+                      if other != name and review.get("verdict")]
+            if others:  # did they side with the majority of the other reviewers on this version?
+                agreement_den += 1
+                agreement_num += verdict == Counter(others).most_common(1)[0][0]
+        a = acct.get(name)
+        days = [date.today() - timedelta(days=d) for d in range(13, -1, -1)]
+        rows.append({"name": name, "display_name": (a or {}).get("display_name", ""), "role": (a or {}).get("role"),
+                     "has_account": bool(a), "blind_answers": len(blinds),
+                     "verdicts": sum(1 for r in recs if r["type"] == "verdict"),
+                     "blind_accuracy": (sum(scored) / len(scored)) if scored else None,
+                     "verdict_counts": counts, "flags_raised": flags_raised,
+                     "agreement": (agreement_num / agreement_den) if agreement_den else None,
+                     "last_activity": max((r.get("time", "") for r in recs), default=None),
+                     "per_day": [{"date": d.isoformat(), "n": per_day.get(d.isoformat(), 0)} for d in days]})
+    return rows
+
+
+def _item_rows(store):
+    """One admin row per item: status summary plus review counts (see /api/admin/items)."""
+    items = store.items()
+    records = load_records(store.reviews_dir)
+    merged = merge_reviews(records)
+    last_activity = {}
+    for rec in records:
+        key = rec["item_id"]
+        if rec.get("time", "") > last_activity.get(key, ""):
+            last_activity[key] = rec.get("time", "")
+    rows = []
+    for it in items.values():
+        reviews = merged.get((it["id"], content_hash(it)), {})
+        st = item_status(it, reviews)
+        rows.append({"id": it["id"], "task": it["task"], "track": it["track"], "source": source_of(it),
+                     "prompt": it["prompt"][:140], "status": st["status"], "verdicts": st["verdicts"],
+                     "agree": st["agree"], "flags": st["flags"], "reviewers": st["reviewers"],
+                     "comments_count": sum(1 for r in reviews.values() if r.get("comment")),
+                     "last_activity": last_activity.get(it["id"])})
+    rows.sort(key=lambda r: r["last_activity"] or "", reverse=True)  # stable; disputed stays on top below
+    rows.sort(key=lambda r: r["status"] != "disputed")
+    return rows
+
+
+def _item_detail(store, item_id, peeker, audit):
+    """The admin audit view of one item: blind view, key view, every reviewer's review, and old-version history.
+    Looking at this page counts as a "peek": recorded, audited, and the peeker's blind answer is later refused."""
+    item = store.items().get(item_id)
+    if item is None:
+        return None
+    records = load_records(store.reviews_dir)
+    item_hash = content_hash(item)
+    reviews = merge_reviews(records).get((item_id, item_hash), {})
+    authors = authors_of(item)
+    peeked = False
+    if peeker and store.peeks:
+        key = f"{item_id}@{item_hash}"
+        if "blind_answer" not in reviews.get(peeker, {}) and store.peeks.add(peeker, key):
+            audit.record(peeker, "peek", key)
+        peeked = store.peeks.has(peeker, key)
+    history = sorted((dict(rec, outdated=True) for rec in records
+                      if rec["item_id"] == item_id and rec.get("item_hash") != item_hash),
+                     key=lambda r: r.get("time", ""), reverse=True)
+    return {"item": {**blind_view(item), **key_view(item)},
+            "status": item_status(item, reviews),
+            "reviews": [dict(review, is_author=name in authors) for name, review in sorted(reviews.items())],
+            "history": history, "peeked": peeked}
+
+
 def make_handler(store, accounts=None, sessions=None, audit=None, secure_cookies=False):
     """Request handler. With ``accounts`` (a ``farhang.accounts.Accounts``) API routes need sign-in: the
     ``fb_session`` cookie from /api/login, or ``Authorization: Basic`` for scripts. Never sends ``WWW-Authenticate``,
@@ -311,6 +479,10 @@ def make_handler(store, accounts=None, sessions=None, audit=None, secure_cookies
         def _json(self, code, obj, extra=()):
             self._send(code, json.dumps(obj, ensure_ascii=False), extra=extra)
 
+        def _admin_ok(self, user):
+            """Local mode treats everyone as an admin; with accounts it takes the admin role."""
+            return accounts is None or user.get("role") == "admin"
+
         # ---------------------------------------------------------- sign-in endpoints
 
         def _whoami(self, user):
@@ -354,6 +526,51 @@ def make_handler(store, accounts=None, sessions=None, audit=None, secure_cookies
 
         # ---------------------------------------------------------- routes
 
+        def _admin(self, url, qs, user, limit, offset):
+            """The admin-only oversight routes (checked by the caller)."""
+            if url.path == "/api/admin/audit":
+                return self._json(200, audit.query(limit=limit, offset=offset,
+                                                   actor=qs.get("actor") or None, action=qs.get("action") or None))
+            if url.path == "/api/admin/activity":
+                rows = _activity_rows(store)
+                rows = [r for r in rows
+                        if (not qs.get("reviewer") or r["reviewer"] == qs["reviewer"])
+                        and (not qs.get("type") or r["type"] == qs["type"])
+                        and (not qs.get("verdict") or r.get("verdict") == qs["verdict"])
+                        and (not qs.get("flagged") or r.get("flags"))
+                        and (not qs.get("item") or r["item_id"] == qs["item"])
+                        and (not qs.get("since") or r["time"] >= qs["since"])
+                        and (not qs.get("until") or r["time"] <= qs["until"])]
+                return self._json(200, {"total": len(rows), "rows": rows[offset:offset + limit]})
+            if url.path == "/api/admin/reviewers":
+                return self._json(200, _reviewer_rows(store, accounts))
+            if url.path.startswith("/api/admin/reviewers/"):
+                name = unquote(url.path[len("/api/admin/reviewers/"):])
+                row = next((r for r in _reviewer_rows(store, accounts) if r["name"] == name), None)
+                if row is None:
+                    return self._json(404, {"error": "no such reviewer"})
+                recent = [r for r in _activity_rows(store) if r["reviewer"] == name][:200]
+                return self._json(200, dict(row, recent=recent))
+            if url.path == "/api/admin/items":
+                rows = _item_rows(store)
+                q = qs.get("q", "").lower()
+                rows = [r for r in rows
+                        if (not qs.get("status") or r["status"] == qs["status"])
+                        and (not qs.get("source") or r["source"] == qs["source"])
+                        and (not qs.get("task") or r["task"] == qs["task"])
+                        and (not qs.get("flag") or qs["flag"] in r["flags"])
+                        and (not qs.get("reviewer") or qs["reviewer"] in r["reviewers"])
+                        and (not qs.get("has_comments") or r["comments_count"] > 0)
+                        and (not q or q in r["id"].lower() or q in r["prompt"].lower())]
+                return self._json(200, {"total": len(rows), "rows": rows[offset:offset + limit]})
+            if url.path.startswith("/api/admin/items/"):
+                peeker = user.get("name") or reviewer_slug(qs.get("reviewer", ""))
+                detail = _item_detail(store, unquote(url.path[len("/api/admin/items/"):]), peeker, audit)
+                if detail is None:
+                    return self._json(404, {"error": "no such item"})
+                return self._json(200, detail)
+            return self._json(404, {"error": "not found"})
+
         def do_GET(self):
             url = urlparse(self.path)
             if url.path == "/healthz":
@@ -375,14 +592,18 @@ def make_handler(store, accounts=None, sessions=None, audit=None, secure_cookies
             if user.get("must_change"):
                 return self._json(403, {"error": "choose a new password first", "must_change": True})
             if url.path in ("/api/users", "/api/admin/users"):
-                if user.get("role") != "admin":
+                if not self._admin_ok(user):
                     return self._json(403, {"error": "admins only"})
                 return self._json(200, accounts.list())
-            if url.path == "/api/admin/audit":
-                if user.get("role") != "admin":
+            if url.path in ("/api/admin/audit", "/api/admin/activity", "/api/admin/reviewers", "/api/admin/items") \
+                    or url.path.startswith(("/api/admin/reviewers/", "/api/admin/items/")):
+                if not self._admin_ok(user):
                     return self._json(403, {"error": "admins only"})
-                return self._json(200, audit.query(limit=int(qs.get("limit", 50)), offset=int(qs.get("offset", 0)),
-                                                   actor=qs.get("actor") or None, action=qs.get("action") or None))
+                try:
+                    limit, offset = max(0, int(qs.get("limit", 50))), max(0, int(qs.get("offset", 0)))
+                except ValueError:
+                    limit, offset = 50, 0
+                return self._admin(url, qs, user, limit, offset)
             if url.path == "/api/export":
                 data = export_zip(store.reviews_dir)
                 return self._send(200, data, "application/zip",
@@ -436,7 +657,7 @@ def make_handler(store, accounts=None, sessions=None, audit=None, secure_cookies
                 if user.get("must_change"):
                     return self._json(403, {"error": "choose a new password first", "must_change": True})
                 if url.path in ("/api/users", "/api/admin/users"):
-                    if user.get("role") != "admin":
+                    if not self._admin_ok(user):
                         return self._json(403, {"error": "admins only"})
                     action, name = body.get("action"), reviewer_slug(body.get("name", ""))
                     if action == "add":
@@ -489,6 +710,8 @@ def serve(data_dir, reviews_dir=REVIEWS_DIR, host="127.0.0.1", port=8766, open_b
     state_dir = Path(accounts_file).parent if accounts_file else None  # the volume next to accounts.json
     sessions = Sessions(state_dir / "sessions.json" if state_dir else None)
     audit = AuditLog(state_dir / "audit.jsonl" if state_dir else None)
+    peeks = Peeks(state_dir / "peeks.json" if state_dir else None)
+    store.peeks = peeks
     if accounts is not None:
         accounts.sessions, accounts.audit = sessions, audit
         try:

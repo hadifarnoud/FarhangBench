@@ -1,0 +1,36 @@
+# Deploy the review page on Coolify with the Docker Compose build pack (see deploy/COOLIFY.md).
+# One service, one replica only: reviews and accounts are appended to plain files under an in-process
+# lock on the farhang-state volume; two replicas would corrupt them. Never scale this above 1.
+services:
+  review:
+    image: ghcr.io/hadifarnoud/farhangbench-review:latest
+    pull_policy: always
+    # No host ports: Coolify's Traefik proxy reaches the app through the internal network and
+    # SERVICE_FQDN_REVIEW_8766 routes the domain to port 8766.
+    expose:
+      - "8766"
+    volumes:
+      - farhang-state:/var/lib/farhang
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8766/healthz', timeout=2)"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+    environment:
+      # Coolify fills SERVICE_FQDN_REVIEW_8766 from the domain set on the "review" service.
+      SERVICE_FQDN_REVIEW_8766: ${SERVICE_FQDN_REVIEW_8766:-}
+      FARHANG_ADMINS: ${FARHANG_ADMINS:?set FARHANG_ADMINS}
+      FARHANG_SECURE_COOKIES: "1"
+      FARHANG_ACCOUNTS_FILE: /var/lib/farhang/accounts.json
+
+volumes:
+  farhang-state:

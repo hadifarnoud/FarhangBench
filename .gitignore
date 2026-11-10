@@ -13,3 +13,6 @@ data/gated/
 
 # E2E screenshots and reports (tests/e2e_review.py)
 artifacts/
+
+# Agent scratch files (test artifacts, overrides)
+.agent/

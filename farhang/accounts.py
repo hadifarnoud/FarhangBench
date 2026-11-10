@@ -3,7 +3,9 @@
 Two kinds of account:
 
 - **Bootstrap admins** come from a read-only users file (``--users``, usually a Kubernetes Secret), one
-  ``name:hash`` line each from ``python -m farhang review-user``. They can't be changed from the page; their
+  ``name:hash`` line each from ``python -m farhang review-user``, and/or the ``FARHANG_ADMINS`` env var
+  (same entries, comma- or newline-separated — for platforms without file Secrets; see ``auth.env_users``).
+  The file wins on a name clash. They can't be changed from the page; their
   ``last_login`` is noted under ``bootstrap_meta`` in the accounts file.
 - **Managed accounts** live in a JSON file on the persistent volume (``--accounts``). Admins add, reset, re-role,
   disable and remove them in the page. A new or reset account gets a one-time password (or one the admin chose)
@@ -25,7 +27,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .auth import Users, hash_password, verify_password
+from .auth import Users, env_users, hash_password, verify_password
 from .validation import reviewer_slug
 
 ROLES = ("reviewer", "admin")
@@ -86,7 +88,17 @@ class Accounts:
     # ------------------------------------------------------------ storage
 
     def _bootstrap_users(self):
-        return self.bootstrap._load() if self.bootstrap else {}
+        """File admins (``--users``) merged over env admins (``FARHANG_ADMINS``): the file wins a name clash.
+        A missing users file only means "no file admins" when FARHANG_ADMINS provides admins — without env
+        admins the OSError propagates, so a broken Secret path is still reported."""
+        merged = env_users()
+        try:
+            if self.bootstrap:
+                merged.update(self.bootstrap._load())
+        except FileNotFoundError:
+            if not merged:
+                raise
+        return merged
 
     def _read_data(self):
         if not self.store_path or not self.store_path.is_file():
@@ -121,7 +133,8 @@ class Accounts:
             raise AccountError(f"cannot read the users file {self.bootstrap.path}: {exc}") from exc
         admins += [n for n, u in self._read().items() if u.get("role") == "admin" and not u.get("disabled")]
         if not admins:
-            raise AccountError("no admin account: put at least one line from `farhang review-user` in --users")
+            raise AccountError("no admin account: put at least one line from `farhang review-user` in --users, "
+                               "or one `farhang review-user NAME --env` entry in FARHANG_ADMINS")
 
     # ------------------------------------------------------------ sign-in
 

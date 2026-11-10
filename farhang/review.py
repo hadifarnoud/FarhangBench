@@ -846,9 +846,10 @@ def make_handler(store, accounts=None, sessions=None, audit=None, secure_cookies
 def serve(data_dir, reviews_dir=REVIEWS_DIR, host="127.0.0.1", port=8766, open_browser=True, users_file=None,
           accounts_file=None, secure_cookies=False):
     from .accounts import AccountError, Accounts, AuditLog
+    from .auth import env_users
     from .sessions import Sessions
     store = ReviewStore(data_dir, reviews_dir)
-    accounts = Accounts(accounts_file, users_file) if (users_file or accounts_file) else None
+    accounts = Accounts(accounts_file, users_file) if (users_file or accounts_file or env_users()) else None
     state_dir = Path(accounts_file).parent if accounts_file else None  # the volume next to accounts.json
     sessions = Sessions(state_dir / "sessions.json" if state_dir else None)
     audit = AuditLog(state_dir / "audit.jsonl" if state_dir else None)

@@ -218,7 +218,7 @@ def cmd_review(args):
 
 def cmd_review_user(args):
     import getpass
-    from .auth import user_line
+    from .auth import env_user_line, user_line
     if args.password_stdin:
         password = sys.stdin.readline().rstrip("\n")
     else:
@@ -229,7 +229,7 @@ def cmd_review_user(args):
     if len(password) < 10:
         print("use at least 10 characters", file=sys.stderr)
         return 1
-    print(user_line(args.name, password))
+    print(env_user_line(args.name, password) if args.env else user_line(args.name, password))
     return 0
 
 
@@ -327,7 +327,8 @@ def main(argv=None):
     p.add_argument("--no-open", action="store_true", help="don't open a browser window")
     p.add_argument("--summary", action="store_true", help="print validation progress and exit")
     p.add_argument("--users", default=os.environ.get("FARHANG_USERS_FILE"),
-                   help="admin accounts (lines from review-user); turns on sign-in. Default: $FARHANG_USERS_FILE")
+                   help="admin accounts (lines from review-user); turns on sign-in. A missing file is fine when "
+                        "FARHANG_ADMINS gives the admins. Default: $FARHANG_USERS_FILE")
     p.add_argument("--accounts", default=os.environ.get("FARHANG_ACCOUNTS_FILE"),
                    help="writable JSON file for the reviewer accounts admins manage in the page. "
                         "Default: $FARHANG_ACCOUNTS_FILE")
@@ -339,6 +340,9 @@ def main(argv=None):
 
     p = sub.add_parser("review-user", help="print a users-file line (name:password hash) for an admin account")
     p.add_argument("name")
+    p.add_argument("--env", action="store_true",
+                   help="print the FARHANG_ADMINS entry instead (name:b64:...): paste-ready for env vars, "
+                        "where the $ in the raw hash would be interpolated away")
     p.add_argument("--password-stdin", action="store_true", help="read the password from stdin instead of prompting")
     p.set_defaults(func=cmd_review_user)
 

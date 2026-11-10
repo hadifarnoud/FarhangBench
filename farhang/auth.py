@@ -2,7 +2,8 @@
 
 A users file has one ``name:hash`` line per reviewer, where the hash comes from ``python -m farhang review-user``.
 Lines starting with ``#`` are ignored. The file is re-read when it changes, so accounts can be added by updating
-the Kubernetes Secret it is mounted from, without a restart.
+the Kubernetes Secret it is mounted from, without a restart. Where there is no file Secrets (e.g. a PaaS like
+Coolify), admins can instead come from the ``FARHANG_ADMINS`` env var — see ``env_users``.
 """
 
 import base64
@@ -40,6 +41,45 @@ def user_line(name, password):
     if not slug:
         raise ValueError("the name needs at least one letter or digit")
     return f"{slug}:{hash_password(password)}"
+
+
+def env_user_line(name, password):
+    """``name:b64:<base64url of the users-file-hash>``: the value one ``FARHANG_ADMINS`` entry needs.
+
+    The hash contains ``$`` characters, which compose files and PaaS variable fields try to interpolate,
+    so the hash travels base64url-encoded (no ``$`` anywhere) instead."""
+    line = user_line(name, password)
+    slug, _, encoded = line.partition(":")
+    token = base64.urlsafe_b64encode(encoded.encode("utf-8")).decode("ascii").rstrip("=")
+    return f"{slug}:b64:{token}"
+
+
+def env_users():
+    """Bootstrap admins from the ``FARHANG_ADMINS`` env var, as ``{name: hash}`` like a users file.
+
+    Entries are separated by commas or newlines; each is ``name:<hash>`` where ``<hash>`` is either the
+    raw users-file hash (``pbkdf2_sha256$...``) or ``b64:<base64url of that hash>`` (see ``env_user_line``).
+    Entries a compose file or variable field mangles are skipped except a bad ``b64:`` value, which
+    raises so a typo fails loudly at startup instead of silently dropping an admin."""
+    users = {}
+    raw = os.environ.get("FARHANG_ADMINS", "")
+    for entry in raw.replace("\n", ",").split(","):
+        entry = entry.strip()
+        if not entry or ":" not in entry:
+            continue
+        name, encoded = entry.split(":", 1)
+        name = reviewer_slug(name)
+        encoded = encoded.strip()
+        if encoded.startswith("b64:"):
+            body = encoded[4:] + "=" * (-len(encoded[4:]) % 4)
+            try:  # validate=True: urlsafe_b64decode would silently drop stray characters
+                encoded = base64.b64decode(body.translate(str.maketrans("-_", "+/")), validate=True) \
+                    .decode("utf-8")
+            except (ValueError, UnicodeDecodeError) as exc:
+                raise ValueError(f"FARHANG_ADMINS: bad b64 value for {name or '?'}") from exc
+        if name:
+            users[name] = encoded
+    return users
 
 
 class Users:

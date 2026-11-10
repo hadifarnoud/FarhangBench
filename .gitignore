@@ -10,3 +10,6 @@ deploy/k8s/users
 
 # Gated datasets imported locally with the user's own access (e.g. Khayyam Challenge); never commit them
 data/gated/
+
+# E2E screenshots and reports (tests/e2e_review.py)
+artifacts/

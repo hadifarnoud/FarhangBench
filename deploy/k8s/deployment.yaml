@@ -35,6 +35,8 @@ spec:
               value: /etc/farhang/users
             - name: FARHANG_ACCOUNTS_FILE
               value: /var/lib/farhang/accounts.json
+            - name: FARHANG_SECURE_COOKIES
+              value: "1"
           readinessProbe:
             httpGet:
               path: /healthz

@@ -1,5 +1,7 @@
 # Deploying the review page on Kubernetes
 
+Deploying on Coolify (self-hosted PaaS) instead? See [COOLIFY.md](COOLIFY.md).
+
 This runs `python -m farhang review` for a team of reviewers: one pod, sign-in required, reviews on a persistent volume, served over HTTPS through an Ingress.
 
 ```

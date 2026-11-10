@@ -59,26 +59,30 @@ def env_users():
 
     Entries are separated by commas or newlines; each is ``name:<hash>`` where ``<hash>`` is either the
     raw users-file hash (``pbkdf2_sha256$...``) or ``b64:<base64url of that hash>`` (see ``env_user_line``).
-    Entries a compose file or variable field mangles are skipped except a bad ``b64:`` value, which
-    raises so a typo fails loudly at startup instead of silently dropping an admin."""
+    Any malformed entry raises ValueError, so a typo or a value mangled by variable interpolation fails
+    loudly at startup instead of starting a server nobody can sign in to."""
     users = {}
     raw = os.environ.get("FARHANG_ADMINS", "")
     for entry in raw.replace("\n", ",").split(","):
         entry = entry.strip()
-        if not entry or ":" not in entry:
+        if not entry:
             continue
-        name, encoded = entry.split(":", 1)
-        name = reviewer_slug(name)
-        encoded = encoded.strip()
+        name, _, encoded = entry.partition(":")
+        name, encoded = reviewer_slug(name), encoded.strip()
+        if not name or not encoded:
+            raise ValueError("FARHANG_ADMINS: each entry must be name:<hash> (see `review-user --env`)")
         if encoded.startswith("b64:"):
             body = encoded[4:] + "=" * (-len(encoded[4:]) % 4)
             try:  # validate=True: urlsafe_b64decode would silently drop stray characters
                 encoded = base64.b64decode(body.translate(str.maketrans("-_", "+/")), validate=True) \
                     .decode("utf-8")
             except (ValueError, UnicodeDecodeError) as exc:
-                raise ValueError(f"FARHANG_ADMINS: bad b64 value for {name or '?'}") from exc
-        if name:
-            users[name] = encoded
+                raise ValueError(f"FARHANG_ADMINS: bad b64 value for {name}") from exc
+        parts = encoded.split("$")
+        if len(parts) != 4 or parts[0] != ALGORITHM or not parts[1].isdigit() or not parts[2] or not parts[3]:
+            raise ValueError(f"FARHANG_ADMINS: the hash for {name} is not a review-user hash "
+                             "(was a $ eaten by variable interpolation? use `review-user --env`)")
+        users[name] = encoded
     return users
 
 

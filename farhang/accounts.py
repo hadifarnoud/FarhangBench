@@ -95,7 +95,7 @@ class Accounts:
         try:
             if self.bootstrap:
                 merged.update(self.bootstrap._load())
-        except OSError:
+        except FileNotFoundError:
             if not merged:
                 raise
         return merged

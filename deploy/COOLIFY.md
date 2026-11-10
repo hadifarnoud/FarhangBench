@@ -15,7 +15,7 @@ lock on one volume; never scale the service above 1.
 
 1. **Create the resource.** In your Coolify project: *Add Resource → Docker Compose → from this GitHub
    repository* (branch `main`, compose path `/docker-compose.yaml`). Coolify checks the compose file
-   out verbatim, so no build happens on the server — the image comes from GHCR.
+   out and pulls the image from GHCR; nothing is built on the server.
 2. **Set the domain.** On the `review` service, set *Domains* to `https://review.<your-domain>`; Coolify
    fills `SERVICE_FQDN_REVIEW_8766` so Traefik routes it to port 8766 and terminates TLS. (The app sets
    cookies `Secure` on its own via `FARHANG_SECURE_COOKIES=1`, and reads `X-Forwarded-For`/`X-Forwarded-Proto`
@@ -29,7 +29,8 @@ lock on one volume; never scale the service above 1.
 
    Paste the whole `name:b64:...` line. Multiple admins: separate entries with commas or newlines
    (each from `review-user <name> --env`). Never remove the last entry without adding another admin
-   first — the server refuses to start with none.
+   first: unless an admin was added in the People tab, the server refuses to start with none. A
+   malformed entry (for example a hash whose `$` signs were eaten) also stops startup with an error.
 4. **Deploy.** Press *Deploy* (or redeploy). Open `https://review.<your-domain>/` and sign in.
    Reviewers are added in the page's **People** tab, exactly as in
    [README.md](README.md#2-accounts).
